@@ -15,6 +15,7 @@ import { getHistory, saveHistoryItem, deleteHistoryItem } from "./database.js";
 import jwt from "jsonwebtoken";
 import argon2 from "argon2";
 import cookieParser from "cookie-parser";
+import { AuthError, getAuthStore } from "./authStore.js";
 import { HardwareAdapter } from "./hardware/hardwareAdapter.js";
 import { validateCamUrl } from "./hardware/cameraService.js";
 
@@ -1679,39 +1680,82 @@ if (!JWT_CONFIGURED) {
     else logger.warn(msg);
 }
 
-// Mock Database for Users
-let usersDB = [
-    {
-        id: 1,
-        username: "vsty",
-        passwordHash: "$argon2id$v=19$m=65536,p=4,t=3$2kKBGWP5Bp/vatQPfSDzug$+mG5Ie33mg1hJ7R3u/JSfOU6j4SGp1F5Q3sFmGfM9Co", 
-        role: "admin",
-        faceRegistered: true,
-        referenceFace: null
-    }
-];
-const usersDbPath = path.join(process.cwd(), 'users_db.json');
-if (fsLib.existsSync(usersDbPath)) {
-    try {
-        usersDB = JSON.parse(fsLib.readFileSync(usersDbPath, 'utf8'));
-    } catch (e) {
-        logger.error("Failed to parse users_db.json", e);
-    }
-}
-function saveUsersDB() {
-    fsLib.writeFileSync(usersDbPath, JSON.stringify(usersDB, null, 2));
-}
-
+const authRateLimitMax = parseInt(process.env.AUTH_RATE_LIMIT_MAX || "25", 10);
 
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 5, 
+    windowMs: 15 * 60 * 1000,
+    max: authRateLimitMax,
     validate: { xForwardedForHeader: false },
     message: { success: false, message: "Too many login attempts, please try again later." }
 });
 
+const registerLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: authRateLimitMax,
+    validate: { xForwardedForHeader: false },
+    message: { success: false, message: "Too many registration attempts, please try again later." }
+});
+
+function issueSessionToken(res: express.Response, user: { id: string | number; username: string; phone?: string | null; role: string }) {
+    const payload = {
+        id: user.id,
+        username: user.username,
+        phone: user.phone ?? null,
+        role: user.role || "operator"
+    };
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "1h" });
+    res.cookie("token", token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 3600000
+    });
+    return { token, user: payload };
+}
+
+const auditLogs: Array<{ action: string; username: string; time: string }> = [];
+
+app.all("/api/auth/register", registerLimiter, async (req, res) => {
+    if (req.method !== "POST") {
+        return res.status(405).json({ success: false, message: "Method Not Allowed" });
+    }
+    try {
+        if (process.env.NODE_ENV === "production" && !JWT_CONFIGURED) {
+            return res.status(503).json({ success: false, message: "Authentication is not configured on the server." });
+        }
+
+        const { username, password, phone } = req.body || {};
+        const store = getAuthStore();
+        const createdUser = await store.registerUser({ username, password, phone });
+        const { token, user } = issueSessionToken(res, createdUser);
+
+        auditLogs.unshift({
+            action: "REGISTER",
+            username: user.username,
+            time: new Date().toISOString()
+        });
+        if (auditLogs.length > 100) auditLogs.pop();
+
+        return res.status(201).json({
+            success: true,
+            user,
+            token
+        });
+    } catch (error: any) {
+        if (error instanceof AuthError) {
+            return res.status(error.status).json({
+                success: false,
+                code: error.code,
+                message: error.message
+            });
+        }
+        logger.error("Registration error", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+});
+
 app.all("/api/auth/login", loginLimiter, async (req, res) => {
-    if (req.method !== 'POST') {
+    if (req.method !== "POST") {
         return res.status(405).json({ success: false, message: "Method Not Allowed" });
     }
     try {
@@ -1719,40 +1763,84 @@ app.all("/api/auth/login", loginLimiter, async (req, res) => {
         if (process.env.NODE_ENV === "production" && !JWT_CONFIGURED) {
             return res.status(503).json({ success: false, message: "Authentication is not configured on the server." });
         }
-        const { username, password } = req.body;
-        if (!username || !password) {
-            return res.status(400).json({ success: false, message: "Username and password required" });
-        }
 
-        const user = usersDB.find(u => u.username.toLowerCase() === username.toLowerCase());
-        if (!user) {
-            return res.status(401).json({ success: false, message: "Invalid credentials" });
-        }
+        const { username, password } = req.body || {};
+        const store = getAuthStore();
+        const authedUser = await store.authenticateUser({ username, password });
+        const { token, user } = issueSessionToken(res, authedUser);
 
-        const isValid = await argon2.verify(user.passwordHash, password);
-        if (!isValid) {
-            return res.status(401).json({ success: false, message: "Invalid credentials" });
-        }
-
-        const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
-        
-        res.cookie('token', token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 3600000 
+        auditLogs.unshift({
+            action: "LOGIN",
+            username: user.username,
+            time: new Date().toISOString()
         });
+        if (auditLogs.length > 100) auditLogs.pop();
 
-        res.json({ success: true, user: { username: user.username, role: user.role }, token });
-    } catch (error) {
+        return res.json({
+            success: true,
+            user,
+            token
+        });
+    } catch (error: any) {
+        if (error instanceof AuthError) {
+            return res.status(error.status).json({
+                success: false,
+                code: error.code,
+                message: error.message
+            });
+        }
         logger.error("Login error", error);
-        res.status(500).json({ success: false, message: "Internal server error" });
+        return res.status(500).json({ success: false, message: "Internal server error" });
     }
 });
 
-const auditLogs = [];
+app.get("/api/auth/me", (req, res) => {
+    const token = req.cookies?.token || req.headers["authorization"]?.split(" ")[1];
+    if (!token) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET) as any;
+        return res.json({
+            success: true,
+            user: {
+                id: decoded.id,
+                username: decoded.username,
+                phone: decoded.phone ?? null,
+                role: decoded.role || "operator"
+            }
+        });
+    } catch {
+        return res.status(401).json({ success: false, message: "Invalid or expired token" });
+    }
+});
 
-app.get("/api/auth/audit-logs", (req, res) => {
+app.post("/api/auth/logout", (_req, res) => {
+    res.clearCookie("token", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict"
+    });
+    return res.json({ success: true });
+});
+
+app.get("/api/auth/status", (_req, res) => {
+    const store = getAuthStore() as any;
+    const diag = typeof store.getDiagnosticStatus === "function" ? store.getDiagnosticStatus() : {};
+    const relatedEnvNames = Object.keys(process.env).filter((k) =>
+        /SUPABASE|DATABASE|POSTGRES|MC_|MISSION_CONTROL|AUTH|JWT|SESSION|SECRET/i.test(k) &&
+        !/^ANTIGRAVITY_/i.test(k)
+    );
+    return res.json({
+        success: true,
+        backendType: store.backendType,
+        jwtConfigured: JWT_CONFIGURED,
+        ...diag,
+        configuredEnvKeys: relatedEnvNames.sort()
+    });
+});
+
+app.get("/api/auth/audit-logs", (_req, res) => {
     res.json({ success: true, logs: auditLogs });
 });
 

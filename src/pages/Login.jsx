@@ -28,10 +28,12 @@ const MicrosoftIcon = () => (
 export default function Login() {
     const navigate = useNavigate();
     const reduce = useReducedMotion();
-    const { enterAsGuest } = useAuth();
+    const { enterAsGuest, completeBackendAuth } = useAuth();
 
+    const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
+    const [profilePhone, setProfilePhone] = useState('');
     const [showPassword, setShowPassword] = useState(false);
     const [error, setError] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -195,33 +197,57 @@ export default function Login() {
         navigate('/dashboard');
     };
 
-    // --- existing email/password auth (backend unchanged) ---
+    // --- username/password registration & sign-in ---
     const handlePasswordLogin = async (e) => {
         e.preventDefault();
         setError('');
         setIsLoading(true);
+        const isRegister = authMode === 'register';
+        const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+        const payload = isRegister
+            ? {
+                  username: username.trim(),
+                  password,
+                  phone: profilePhone.trim() || null,
+              }
+            : {
+                  username: username.trim(),
+                  password,
+              };
         try {
-            const response = await fetch(window.location.origin + '/api/auth/login', {
+            const response = await fetch(window.location.origin + endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify(payload)
             });
-            if (!response.ok) { setError(`Server returned error (${response.status})`); return; }
             const contentType = response.headers.get("content-type") || "";
-            if (!contentType.includes("application/json")) { setError('Invalid server response format'); return; }
             const text = await response.text();
-            if (!text || text.trim().startsWith("<")) { setError('Received HTML instead of JSON'); return; }
-            const data = JSON.parse(text);
+            let data = null;
+            if (contentType.includes("application/json") && text && !text.trim().startsWith("<")) {
+                try {
+                    data = JSON.parse(text);
+                } catch {
+                    data = null;
+                }
+            }
+            if (!response.ok) {
+                setError(data?.message || `Server returned error (${response.status})`);
+                return;
+            }
+            if (!data) {
+                setError('Invalid server response format');
+                return;
+            }
             if (data.success) {
-                localStorage.setItem('token', data.token);
-                localStorage.setItem('user', JSON.stringify(data.user));
+                completeBackendAuth(data.user, data.token);
+                toast.success(isRegister ? 'Account created and signed in.' : 'Signed in.', { title: 'Welcome' });
                 navigate('/dashboard');
             } else {
-                setError(data.message || 'Login failed');
+                setError(data.message || (isRegister ? 'Registration failed' : 'Login failed'));
             }
         } catch (err) {
-            console.error('Login error', err);
-            setError('An error occurred during login');
+            console.error('Auth error', err);
+            setError(isRegister ? 'An error occurred during registration' : 'An error occurred during login');
         } finally {
             setIsLoading(false);
         }
@@ -244,8 +270,8 @@ export default function Login() {
                 >
                     <div className="signin-head">
                         <span className="signin-badge"><ShieldCheck size={26} /></span>
-                        <h2>Welcome Back</h2>
-                        <p>{view === 'phone' ? 'Sign in with your phone number' : view === 'email' ? 'Sign in or register with an email code' : 'Sign in to access Mission Control'}</p>
+                        <h2>{view === 'default' && authMode === 'register' ? 'Create Account' : 'Welcome Back'}</h2>
+                        <p>{view === 'phone' ? 'Sign in with your phone number' : view === 'email' ? 'Sign in or register with an email code' : authMode === 'register' ? 'Create an operator account for Mission Control' : 'Sign in to access Mission Control'}</p>
                     </div>
 
                     {!isSupabaseConfigured && (
@@ -360,27 +386,48 @@ export default function Login() {
                             <form className="signin-form" onSubmit={handlePasswordLogin} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                                 <div className="signin-field">
                                     <span className="signin-field__icon"><User size={18} /></span>
-                                    <input id="username-input" className="signin-input" type="text" placeholder="Username or email"
+                                    <input id="username-input" className="signin-input" type="text" placeholder={authMode === 'register' ? 'Username' : 'Username or email'}
                                         value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
                                 </div>
 
                                 <div className="signin-field">
                                     <span className="signin-field__icon"><Lock size={18} /></span>
-                                    <input id="password-input" className="signin-input signin-input--pw" type={showPassword ? 'text' : 'password'} placeholder="Password"
-                                        value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+                                    <input id="password-input" className="signin-input signin-input--pw" type={showPassword ? 'text' : 'password'} placeholder={authMode === 'register' ? 'Password (min. 6 characters)' : 'Password'}
+                                        value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} required />
                                     <button type="button" className="signin-pw-toggle" onClick={() => setShowPassword((s) => !s)} aria-label={showPassword ? 'Hide password' : 'Show password'}>
                                         {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                                     </button>
                                 </div>
 
+                                {authMode === 'register' && (
+                                    <div className="signin-field">
+                                        <span className="signin-field__icon"><Phone size={18} /></span>
+                                        <input id="phone-input" className="signin-input" type="tel" placeholder="Phone number (optional)"
+                                            value={profilePhone} onChange={(e) => setProfilePhone(e.target.value)} autoComplete="tel" />
+                                    </div>
+                                )}
+
                                 <div className="signin-options">
                                     <label className="signin-remember"><input type="checkbox" /> Remember me</label>
-                                    <button type="button" className="signin-forgot">Forgot password?</button>
+                                    <button
+                                        type="button"
+                                        id="auth-mode-switch"
+                                        className="signin-forgot"
+                                        onClick={() => {
+                                            setError('');
+                                            setAuthMode((m) => (m === 'register' ? 'login' : 'register'));
+                                        }}
+                                    >
+                                        {authMode === 'register' ? 'Already have an account? Sign in' : 'Create account'}
+                                    </button>
                                 </div>
 
                                 <button type="submit" className="signin-primary" disabled={isLoading}>
                                     {isLoading ? <Spinner /> : null}
-                                    {isLoading ? 'Authenticating…' : 'Sign In'} {!isLoading && <ArrowRight size={18} />}
+                                    {isLoading
+                                        ? (authMode === 'register' ? 'Creating account…' : 'Authenticating…')
+                                        : (authMode === 'register' ? 'Create Account' : 'Sign In')}{' '}
+                                    {!isLoading && <ArrowRight size={18} />}
                                 </button>
                             </form>
 

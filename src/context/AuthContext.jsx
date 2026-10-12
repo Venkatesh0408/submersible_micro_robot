@@ -4,36 +4,86 @@ import { supabase, isSupabaseConfigured } from "../lib/supabase";
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 
-const GUEST_KEY = "token"; // reuses the existing guest-token key
+const TOKEN_KEY = "token";
+const USER_KEY = "user";
+
 const readGuest = () => {
-    const t = localStorage.getItem(GUEST_KEY);
-    return typeof t === "string" && t.startsWith("guest-");
+    try {
+        const t = localStorage.getItem(TOKEN_KEY);
+        return typeof t === "string" && t.startsWith("guest-");
+    } catch {
+        return false;
+    }
+};
+
+const readStoredBackendUser = () => {
+    try {
+        const t = localStorage.getItem(TOKEN_KEY);
+        if (!t || t.startsWith("guest-")) return null;
+        const rawUser = localStorage.getItem(USER_KEY);
+        if (!rawUser) return null;
+        const parsed = JSON.parse(rawUser);
+        return parsed && typeof parsed === "object" && parsed.username ? parsed : null;
+    } catch {
+        return null;
+    }
 };
 
 export function AuthProvider({ children }) {
     const [session, setSession] = useState(null);
-    const [user, setUser] = useState(null);
-    const [guest, setGuest] = useState(readGuest());
+    const [backendUser, setBackendUser] = useState(readStoredBackendUser);
+    const [guest, setGuest] = useState(readGuest);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         let active = true;
+
+        const verifyBackendToken = async () => {
+            try {
+                const token = localStorage.getItem(TOKEN_KEY);
+                if (!token || token.startsWith("guest-")) return;
+                const res = await fetch("/api/auth/me", {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
+                if (!active) return;
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data?.success && data?.user) {
+                        setBackendUser(data.user);
+                        localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+                        return;
+                    }
+                }
+                if (res.status === 401 || res.status === 403) {
+                    localStorage.removeItem(TOKEN_KEY);
+                    localStorage.removeItem(USER_KEY);
+                    setBackendUser(null);
+                }
+            } catch {
+                // Keep cached backendUser if offline
+            }
+        };
+
+        verifyBackendToken();
+
         if (!supabase) {
             setLoading(false);
-            return;
+            return () => {
+                active = false;
+            };
         }
         supabase.auth.getSession().then(({ data }) => {
             if (!active) return;
             setSession(data.session);
-            setUser(data.session?.user ?? null);
             setLoading(false);
         });
         const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
             setSession(s);
-            setUser(s?.user ?? null);
             if (s) {
-                // A real session supersedes a guest session.
-                localStorage.removeItem(GUEST_KEY);
+                // A real Supabase session supersedes a guest session.
+                if (readGuest()) {
+                    localStorage.removeItem(TOKEN_KEY);
+                }
                 setGuest(false);
             }
         });
@@ -43,10 +93,22 @@ export function AuthProvider({ children }) {
         };
     }, []);
 
+    const completeBackendAuth = (userObj, token) => {
+        if (token) {
+            localStorage.setItem(TOKEN_KEY, token);
+        }
+        if (userObj) {
+            localStorage.setItem(USER_KEY, JSON.stringify(userObj));
+        }
+        setBackendUser(userObj || null);
+        setGuest(false);
+    };
+
     // No-auth path into the dashboard.
     const enterAsGuest = () => {
-        localStorage.setItem(GUEST_KEY, "guest-" + Date.now());
-        localStorage.setItem("user", JSON.stringify({ username: "Guest Operator", role: "guest" }));
+        localStorage.setItem(TOKEN_KEY, "guest-" + Date.now());
+        localStorage.setItem(USER_KEY, JSON.stringify({ username: "Guest Operator", role: "guest" }));
+        setBackendUser(null);
         setGuest(true);
     };
 
@@ -58,24 +120,34 @@ export function AuthProvider({ children }) {
                 console.warn("signOut error", e);
             }
         }
-        localStorage.removeItem(GUEST_KEY);
-        localStorage.removeItem("user");
+        try {
+            await fetch("/api/auth/logout", { method: "POST" });
+        } catch {
+            // ignore network error on logout
+        }
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(USER_KEY);
         setSession(null);
-        setUser(null);
+        setBackendUser(null);
         setGuest(false);
     };
+
+    const activeUser = session?.user ?? backendUser ?? (guest ? { username: "Guest Operator", role: "guest" } : null);
 
     const value = {
         supabase,
         isSupabaseConfigured,
         session,
-        user,
+        user: activeUser,
+        backendUser,
         guest,
-        isAuthed: Boolean(session) || guest,
+        isAuthed: Boolean(session) || Boolean(backendUser) || guest,
         loading,
+        completeBackendAuth,
         enterAsGuest,
         signOut,
     };
 
     return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
+
