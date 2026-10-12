@@ -15,8 +15,21 @@ import { getHistory, saveHistoryItem, deleteHistoryItem } from "./database.js";
 import jwt from "jsonwebtoken";
 import argon2 from "argon2";
 import cookieParser from "cookie-parser";
+import { HardwareAdapter } from "./hardware/hardwareAdapter.js";
+import { validateCamUrl } from "./hardware/cameraService.js";
 
 dotenv.config();
+
+export const hardwareAdapter = new HardwareAdapter();
+if (
+  hardwareAdapter.mode === "REAL" &&
+  hardwareAdapter.config.controller.serialPort &&
+  !hardwareAdapter.config.isCloudEnvironment
+) {
+  hardwareAdapter.connectController().catch((err) => {
+    logger.warn(`[hardware] Startup serial connect deferred: ${err?.message || err}`);
+  });
+}
 
 let ai = null;
 function getAI() {
@@ -353,68 +366,11 @@ function updateRobotSimulation() {
 // ==========================================================
 
 app.get("/api/health", (req, res) => {
-  const isMotorError = Math.random() > 0.95;
-  const isCommError = Math.random() > 0.95;
-
-  res.json([
-    { 
-        name: "🔋 12V Li-Ion Battery", 
-        value: robotState.battery + "%", 
-        width: robotState.battery + "%", 
-        color: robotState.battery > 20 ? "#00ff88" : "#ff4444", 
-        status: robotState.battery > 20 ? "OK" : "WARNING" 
-    },
-    { 
-        name: "📡 ESP32-CAM WiFi Network", 
-        value: isCommError ? "Packet Loss" : "Stable", 
-        width: isCommError ? "40%" : "100%", 
-        color: isCommError ? "#ff4444" : "#00d4ff", 
-        status: isCommError ? "ERROR" : "OK",
-        error: isCommError ? "Live video stream latency high." : null,
-        solution: isCommError ? "Check Wi-Fi connection on ESP32-CAM module." : null
-    },
-    { 
-        name: "⚙️ L298N Motor Driver", 
-        value: isMotorError ? "Overheat" : "Optimal", 
-        width: isMotorError ? "30%" : "100%", 
-        color: isMotorError ? "#ff4444" : "#00ff88", 
-        status: isMotorError ? "ERROR" : "OK",
-        error: isMotorError ? "High current drawn by DC Thrusters." : null,
-        solution: isMotorError ? "Inspect thrusters for debris." : null
-    },
-    { 
-        name: "🧭 MPU6050 IMU", 
-        value: "Active", 
-        width: "100%", 
-        color: "#7b61ff", 
-        status: "OK" 
-    },
-    { 
-        name: "🧠 Arduino Nano (Master MCU Controller)", 
-        value: "35% Load", 
-        width: "35%", 
-        color: "#ff9800", 
-        status: "OK" 
-    },
-    { 
-        name: "❤️ Overall Health", 
-        value: (isMotorError || isCommError) ? "Warning" : "98%", 
-        width: (isMotorError || isCommError) ? "50%" : "98%", 
-        color: (isMotorError || isCommError) ? "#ff9800" : "#00ff88", 
-        status: (isMotorError || isCommError) ? "WARNING" : "OK" 
-    }
-  ]);
+  res.json(hardwareAdapter.getHealthResponse(robotState));
 });
 
 app.get("/api/status", (req, res) => {
-  res.json({
-    status: robotState.status,
-    mode: robotState.mode,
-    running: robotState.running,
-    emergency: robotState.emergency,
-    battery: parseFloat(robotState.battery.toFixed(1)),
-    signal: parseFloat(robotState.signal.toFixed(1))
-  });
+  res.json(hardwareAdapter.getStatusResponse(robotState));
 });
 
 app.get("/api/mission", (req, res) => {
@@ -427,58 +383,14 @@ app.get("/api/mission", (req, res) => {
     total_waypoints: robotState.total_waypoints,
     distance: robotState.distance,
     remaining_distance: robotState.remaining_distance,
-    eta: robotState.eta
+    eta: robotState.eta,
+    hardwareMode: hardwareAdapter.mode,
+    simulated: hardwareAdapter.mode === "SIMULATION"
   });
 });
 
 app.get("/api/sensors", (req, res) => {
-  // Simulate occasional realistic sensor errors
-  const isTempError = Math.random() > 0.9;
-  const isPhError = Math.random() > 0.9;
-  const isTurbError = Math.random() > 0.9;
-  
-  res.json([
-    {
-        name: "🌡 Temperature",
-        value: isTempError ? "ERR" : robotState.temperature,
-        unit: "°C",
-        status: isTempError ? "ERROR" : "OK",
-        error: isTempError ? "DS18B20 disconnected." : null,
-        solution: isTempError ? "Check wiring to Arduino Nano." : null
-    },
-    {
-        name: "💧 pH Level",
-        value: isPhError ? "ERR" : robotState.ph,
-        unit: "",
-        status: isPhError ? "ERROR" : "OK",
-        error: isPhError ? "Analog pH sensor unstable." : null,
-        solution: isPhError ? "Recalibrate using buffer solutions." : null
-    },
-    {
-        name: "🌊 Turbidity",
-        value: isTurbError ? "ERR" : robotState.turbidity,
-        unit: "NTU",
-        status: isTurbError ? "ERROR" : "OK",
-        error: isTurbError ? "Turbidity sensor covered by debris." : null,
-        solution: isTurbError ? "Clean sensor optics." : null
-    },
-    {
-        name: "📏 Depth",
-        value: robotState.progress,
-        unit: "m",
-        status: "OK",
-        error: null,
-        solution: null
-    },
-    {
-        name: "🔋 12V Li-Ion Battery",
-        value: robotState.battery,
-        unit: "%",
-        status: "OK",
-        error: null,
-        solution: null
-    }
-  ]);
+  res.json(hardwareAdapter.getSensorsResponse(robotState));
 });
 
 app.get("/api/gps", (req, res) => {
@@ -488,7 +400,10 @@ app.get("/api/gps", (req, res) => {
     heading: robotState.heading,
     waypoints: robotState.waypoints,
     currentWaypoint: robotState.current_waypoint,
-    totalWaypoints: robotState.total_waypoints
+    totalWaypoints: robotState.total_waypoints,
+    hardwareMode: hardwareAdapter.mode,
+    gpsInstalled: hardwareAdapter.config.sensors.gps.installed,
+    surfaceOnlyPositioning: true
   });
 });
 
@@ -557,6 +472,27 @@ app.post("/api/waypoints", (req, res) => {
 });
 
 app.post("/api/start", (req, res) => {
+  if (hardwareAdapter.mode === "REAL") {
+    if (!hardwareAdapter.controller.isConnected) {
+      return res.status(503).json({
+        success: false,
+        status: "HARDWARE_DISCONNECTED",
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: "Cannot start physical mission: Arduino controller is not connected."
+      });
+    }
+    if (hardwareAdapter.config.propulsion.allowedStage !== "FULL_PROPULSION") {
+      return res.status(503).json({
+        success: false,
+        status: "PROPULSION_UNCONFIRMED",
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: "Autonomous multi-thruster mission is blocked in REAL mode until 2x L298N drivers and 4-motor thrust geometry are physically verified."
+      });
+    }
+  }
+
   robotState.running = true;
   robotState.paused = false;
   robotState.status = "MISSION_RUNNING";
@@ -573,11 +509,13 @@ app.post("/api/start", (req, res) => {
   res.json({
     success: true,
     status: robotState.status,
+    hardwareMode: hardwareAdapter.mode,
+    simulated: hardwareAdapter.mode === "SIMULATION",
     message: "Mission Started"
   });
 });
 
-app.post("/api/pause", (req, res) => {
+app.post("/api/pause", async (req, res) => {
   robotState.running = false;
   robotState.paused = true;
   robotState.status = "MISSION_PAUSED";
@@ -588,14 +526,40 @@ app.post("/api/pause", (req, res) => {
     time: new Date().toLocaleTimeString()
   });
 
+  if (hardwareAdapter.mode === "REAL") {
+    const stopRes = await hardwareAdapter.controller.stopPropulsion();
+    if (!stopRes.ok || !stopRes.confirmedByController) {
+      return res.status(503).json({
+        success: false,
+        status: robotState.status,
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: stopRes.message
+      });
+    }
+  }
+
   res.json({
     success: true,
     status: robotState.status,
+    hardwareMode: hardwareAdapter.mode,
     message: "Mission Paused"
   });
 });
 
 app.post("/api/resume", (req, res) => {
+  if (hardwareAdapter.mode === "REAL") {
+    if (!hardwareAdapter.controller.isConnected || !hardwareAdapter.controller.isArmed) {
+      return res.status(503).json({
+        success: false,
+        status: "HARDWARE_NOT_ARMED",
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: "Cannot resume physical mission: controller is disconnected or disarmed."
+      });
+    }
+  }
+
   robotState.running = true;
   robotState.paused = false;
   robotState.status = "MISSION_RUNNING";
@@ -609,11 +573,12 @@ app.post("/api/resume", (req, res) => {
   res.json({
     success: true,
     status: robotState.status,
+    hardwareMode: hardwareAdapter.mode,
     message: "Mission Resumed"
   });
 });
 
-app.post("/api/emergency-stop", (req, res) => {
+app.post("/api/emergency-stop", async (req, res) => {
   robotState.emergency = true;
   robotState.running = false;
   robotState.paused = false;
@@ -629,10 +594,38 @@ app.post("/api/emergency-stop", (req, res) => {
   });
 
   logger.warn("Emergency stop activated via API.");
-  res.json({ success: true, status: robotState.status, message: "EMERGENCY STOP EXECUTED" });
+
+  if (hardwareAdapter.mode === "REAL" || hardwareAdapter.controller.isConnected) {
+    const estopRes = await hardwareAdapter.controller.emergencyStop();
+    if (hardwareAdapter.mode === "REAL" && (!estopRes.ok || !estopRes.confirmedByController)) {
+      return res.status(503).json({
+        success: false,
+        status: "EMERGENCY_STOP_UNCONFIRMED",
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: estopRes.message
+      });
+    }
+    return res.json({
+      success: true,
+      status: robotState.status,
+      hardwareMode: hardwareAdapter.mode,
+      hardwareConfirmed: estopRes.confirmedByController,
+      message: estopRes.message
+    });
+  }
+
+  res.json({
+    success: true,
+    status: robotState.status,
+    hardwareMode: "SIMULATION",
+    hardwareConfirmed: false,
+    simulated: true,
+    message: "EMERGENCY STOP EXECUTED (SIMULATION)"
+  });
 });
 
-app.post("/api/stop", (req, res) => {
+app.post("/api/stop", async (req, res) => {
   robotState.running = false;
   robotState.paused = false;
   robotState.status = "MISSION_STOPPED";
@@ -646,14 +639,46 @@ app.post("/api/stop", (req, res) => {
     time: new Date().toLocaleTimeString()
   });
 
+  if (hardwareAdapter.mode === "REAL" || hardwareAdapter.controller.isConnected) {
+    const stopRes = await hardwareAdapter.controller.stopPropulsion();
+    if (hardwareAdapter.mode === "REAL" && (!stopRes.ok || !stopRes.confirmedByController)) {
+      return res.status(503).json({
+        success: false,
+        status: "STOP_UNCONFIRMED",
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: stopRes.message
+      });
+    }
+    return res.json({
+      success: true,
+      status: robotState.status,
+      hardwareMode: hardwareAdapter.mode,
+      hardwareConfirmed: stopRes.confirmedByController,
+      message: "Mission Stopped"
+    });
+  }
+
   res.json({
     success: true,
     status: robotState.status,
+    hardwareMode: "SIMULATION",
+    simulated: true,
     message: "Mission Stopped"
   });
 });
 
 app.post("/api/home", (req, res) => {
+  if (hardwareAdapter.mode === "REAL") {
+    return res.status(503).json({
+      success: false,
+      status: "SURFACE_GPS_ONLY",
+      hardwareMode: "REAL",
+      hardwareConfirmed: false,
+      message: "Autonomous underwater Return-to-Home is blocked in REAL mode: NEO-6M GPS works only at the surface and 4-motor thrust geometry is unconfirmed."
+    });
+  }
+
   robotState.return_home_active = true;
   robotState.running = true;
   robotState.status = "RETURNING_HOME";
@@ -667,6 +692,8 @@ app.post("/api/home", (req, res) => {
   res.json({
     success: true,
     status: robotState.status,
+    hardwareMode: "SIMULATION",
+    simulated: true,
     message: "Returning Home"
   });
 });
@@ -685,9 +712,40 @@ app.get("/api/settings", (req, res) => {
 });
 
 // Camera image capture API
-app.post("/capture", (req, res) => {
+app.post("/capture", async (req, res) => {
+  if (hardwareAdapter.mode === "REAL") {
+    const targetUrl =
+      hardwareAdapter.camera.status.targetUrl ||
+      hardwareAdapter.camera.getDefaultCaptureUrl();
+    const snap = await hardwareAdapter.camera.captureSnapshotToFile(
+      targetUrl,
+      path.join(process.cwd(), "public", "media")
+    );
+    if (!snap.success || !snap.file) {
+      return res.status(503).json({
+        success: false,
+        simulated: false,
+        hardwareMode: "REAL",
+        message: snap.message,
+        mission: robotState.mission_name,
+        status: robotState.status
+      });
+    }
+    return res.json({
+      success: true,
+      simulated: false,
+      hardwareMode: "REAL",
+      image: snap.file.url,
+      file: snap.file,
+      mission: robotState.mission_name,
+      status: robotState.status
+    });
+  }
+
   res.json({
     success: true,
+    simulated: true,
+    hardwareMode: "SIMULATION",
     image: "https://images.unsplash.com/photo-1582967160759-407fb51b5e39?q=80&w=900&auto=format&fit=crop", // underwater pipe style
     mission: robotState.mission_name,
     status: robotState.status
@@ -842,28 +900,6 @@ app.delete("/api/media/:filename", (req, res) => {
 // ESP32-CAM WIRELESS WIFI CAMERA STREAMING & PROXY
 // ==========================================================
 
-// SSRF guard: the camera is always a device on the user's LAN, so only allow the proxy to
-// fetch private/loopback addresses (or *.local mDNS names). This stops the open `?url=` param
-// from being pointed at cloud metadata (169.254.169.254) or arbitrary public/internal hosts.
-function validateCamUrl(raw: string): { ok: boolean; reason?: string } {
-  let url: URL;
-  try { url = new URL(raw); } catch { return { ok: false, reason: "Invalid URL" }; }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, reason: "Only http/https is allowed" };
-  const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local")) return { ok: true };
-  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!m) return { ok: false, reason: "Camera address must be a private LAN IP or a .local name" };
-  if (m.slice(1).some((o) => Number(o) > 255)) return { ok: false, reason: "Invalid IP address" };
-  const a = Number(m[1]), b = Number(m[2]);
-  const isPrivate =
-    a === 10 ||
-    a === 127 ||
-    (a === 192 && b === 168) ||
-    (a === 172 && b >= 16 && b <= 31);
-  if (!isPrivate) return { ok: false, reason: "Only private LAN addresses (10.x, 172.16–31.x, 192.168.x) are allowed" };
-  return { ok: true };
-}
-
 // Ping/Test ESP32-CAM Camera connection over WiFi
 const handleCamPing = async (req: express.Request, res: express.Response) => {
   const targetUrl = req.query.url as string;
@@ -877,45 +913,15 @@ const handleCamPing = async (req: express.Request, res: express.Response) => {
     return;
   }
 
-  const startTime = Date.now();
-  try {
-    const protocol = targetUrl.startsWith("https") ? https : http;
-    const clientReq = protocol.get(targetUrl, { timeout: 3000 }, (clientRes) => {
-      const latencyMs = Date.now() - startTime;
-      clientRes.destroy(); // Just checking headers / connectivity
-      if (!res.headersSent) {
-        res.json({
-          online: true,
-          status: clientRes.statusCode,
-          contentType: clientRes.headers["content-type"] || "video/mjpeg",
-          latencyMs,
-          message: `ESP32-CAM connected over WiFi (${latencyMs}ms)`
-        });
-      }
+  const status = await hardwareAdapter.camera.pingCamera(targetUrl);
+  if (!res.headersSent) {
+    res.json({
+      online: status.online,
+      status: status.statusCode,
+      contentType: status.contentType || "video/mjpeg",
+      latencyMs: status.latencyMs,
+      message: status.message
     });
-
-    clientReq.on("error", (err) => {
-      if (!res.headersSent) {
-        res.json({
-          online: false,
-          message: `Could not reach ESP32-CAM at ${targetUrl}: ${err.message}`
-        });
-      }
-    });
-
-    clientReq.on("timeout", () => {
-      clientReq.destroy();
-      if (!res.headersSent) {
-        res.json({
-          online: false,
-          message: `Timeout connecting to ESP32-CAM at ${targetUrl}`
-        });
-      }
-    });
-  } catch (err: any) {
-    if (!res.headersSent) {
-      res.json({ online: false, message: err.message || "Failed to reach ESP32-CAM" });
-    }
   }
 };
 
@@ -927,6 +933,12 @@ const handleCamProxy = (req: express.Request, res: express.Response) => {
   const targetUrl = req.query.url as string;
   if (!targetUrl) {
     if (!res.headersSent) return res.status(400).send("Missing ESP32-CAM stream URL");
+    return;
+  }
+  if (hardwareAdapter.config.isCloudEnvironment) {
+    if (!res.headersSent) {
+      return res.status(503).send("Cloud backend cannot proxy a private LAN ESP32-CAM stream. Run locally on the robot's LAN.");
+    }
     return;
   }
   const guard = validateCamUrl(targetUrl);
@@ -976,7 +988,7 @@ const handleCamProxy = (req: express.Request, res: express.Response) => {
 app.get("/api/esp-proxy", handleCamProxy);
 app.get("/api/rpi-proxy", handleCamProxy);
 
-// Capture a live snapshot from ESP32-CAM stream and save to /public/media/
+// Capture a live snapshot from ESP32-CAM stream/capture endpoint and save a validated JPEG to /public/media/
 const handleCamSnapshot = async (req: express.Request, res: express.Response) => {
   const { url, filename } = req.body || {};
   if (!url) {
@@ -989,41 +1001,21 @@ const handleCamSnapshot = async (req: express.Request, res: express.Response) =>
     return;
   }
 
-  try {
-    const safeName = filename ? path.basename(filename) : `esp-snapshot-${Date.now()}.jpg`;
-    const targetPath = path.join(mediaDir, safeName);
-
-    const protocol = url.startsWith("https") ? https : http;
-    const snapshotReq = protocol.get(url, { timeout: 5000 }, (streamRes) => {
-      const chunks: Buffer[] = [];
-      streamRes.on("data", (chunk) => chunks.push(chunk));
-      streamRes.on("end", () => {
-        const fullBuffer = Buffer.concat(chunks);
-        fsLib.writeFileSync(targetPath, fullBuffer);
-        logger.info(`Saved ESP32-CAM snapshot to ${targetPath}`);
-
-        if (!res.headersSent) {
-          res.json({
-            success: true,
-            message: "Snapshot captured from ESP32-CAM and saved to /public/media/",
-            file: {
-              filename: safeName,
-              url: `/media/${safeName}`
-            }
-          });
-        }
+  const snapResult = await hardwareAdapter.camera.captureSnapshotToFile(url, mediaDir, filename);
+  if (!res.headersSent) {
+    if (snapResult.success && snapResult.file) {
+      res.json({
+        success: true,
+        simulated: false,
+        message: snapResult.message,
+        file: snapResult.file
       });
-    });
-
-    snapshotReq.on("error", (err) => {
-      logger.error(`ESP32-CAM Snapshot Error: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({ success: false, message: `Failed to capture ESP32-CAM frame: ${err.message}` });
-      }
-    });
-  } catch (err: any) {
-    if (!res.headersSent) {
-      res.status(500).json({ success: false, message: err.message });
+    } else {
+      res.status(502).json({
+        success: false,
+        simulated: false,
+        message: snapResult.message
+      });
     }
   }
 };
@@ -1456,33 +1448,156 @@ app.get("/api/ai/statistics", async (req, res) => {
   });
 });
 
-// Get telemetry: updates robot simulation state on poll
+// Get telemetry: updates robot simulation state on poll when in SIMULATION mode
 app.get("/api/telemetry", (req, res) => {
-  updateRobotSimulation();
-  res.json({
-    latitude: parseFloat(robotState.latitude.toFixed(6)),
-    longitude: parseFloat(robotState.longitude.toFixed(6)),
-    heading: robotState.heading,
-    speed: parseFloat(robotState.speed.toFixed(2)),
-    battery: parseFloat(robotState.battery.toFixed(1)),
-    signal: parseFloat(robotState.signal.toFixed(1)),
-    status: robotState.status,
-    mode: robotState.mode,
-    progress: robotState.progress,
-    currentWaypoint: robotState.current_waypoint,
-    totalWaypoints: robotState.total_waypoints,
-    distance: robotState.distance,
-    remainingDistance: robotState.remaining_distance,
-    eta: robotState.eta,
-    camera: robotState.camera,
-    ai: robotState.ai,
-    temperature: robotState.temperature,
-    ph: robotState.ph,
-    turbidity: robotState.turbidity,
-    ultrasonic: robotState.ultrasonic,
-    event_logs: eventLogs.slice(0, 15) // send latest logs too if desired
-  });
+  if (hardwareAdapter.mode === "SIMULATION") {
+    updateRobotSimulation();
+  }
+  res.json(hardwareAdapter.getTelemetryResponse(robotState, eventLogs));
 });
+
+// ==========================================================
+// HARDWARE INTEGRATION & BENCH-TESTING API (/api/hardware/*)
+// ==========================================================
+function isLocalRequest(req: express.Request): boolean {
+  if (hardwareAdapter.config.isCloudEnvironment) return false;
+  const ip = req.ip || req.socket?.remoteAddress || "";
+  return (
+    ip === "127.0.0.1" ||
+    ip === "::1" ||
+    ip === "::ffff:127.0.0.1" ||
+    ip.startsWith("192.168.") ||
+    ip.startsWith("10.") ||
+    ip.startsWith("::ffff:192.168.") ||
+    ip.startsWith("::ffff:10.") ||
+    process.env.NODE_ENV !== "production"
+  );
+}
+
+app.get("/api/hardware/status", async (req, res) => {
+  const status = await hardwareAdapter.getDiagnosticsStatus();
+  res.json(status);
+});
+
+app.post("/api/hardware/mode", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Hardware mode switching is restricted to local host execution." });
+  }
+  const mode = String(req.body?.mode || "").toUpperCase();
+  if (mode !== "SIMULATION" && mode !== "REAL") {
+    return res.status(400).json({ success: false, message: "Invalid mode. Must be 'SIMULATION' or 'REAL'." });
+  }
+  const result = await hardwareAdapter.setOperatingMode(mode as "SIMULATION" | "REAL");
+  eventLogs.unshift({
+    type: "HARDWARE",
+    message: `Hardware mode set to ${result.mode}: ${result.message}`,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.json({ success: true, ...result });
+});
+
+app.post("/api/hardware/connect", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Physical controller connection is restricted to local host execution." });
+  }
+  const port = typeof req.body?.port === "string" ? req.body.port.trim() : undefined;
+  if (port) {
+    hardwareAdapter.config.controller.serialPort = port;
+    hardwareAdapter.controller.updateConfig(hardwareAdapter.config);
+  }
+  const result = await hardwareAdapter.connectController();
+  eventLogs.unshift({
+    type: result.ok ? "HARDWARE" : "WARNING",
+    message: result.message,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.status(result.ok ? 200 : 503).json({ success: result.ok, ...result });
+});
+
+app.post("/api/hardware/disconnect", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Restricted to local host execution." });
+  }
+  await hardwareAdapter.disconnectController();
+  eventLogs.unshift({
+    type: "HARDWARE",
+    message: "Physical controller disconnected by operator.",
+    time: new Date().toLocaleTimeString(),
+  });
+  res.json({ success: true, message: "Controller disconnected." });
+});
+
+app.post("/api/hardware/arm", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Propulsion arming is restricted to local bench execution." });
+  }
+  const result = await hardwareAdapter.controller.armPropulsion();
+  eventLogs.unshift({
+    type: result.ok ? "SAFETY" : "ERROR",
+    message: `Propulsion ARM request: ${result.message}`,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
+});
+
+app.post("/api/hardware/disarm", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Restricted to local host execution." });
+  }
+  const result = await hardwareAdapter.controller.disarmPropulsion();
+  eventLogs.unshift({
+    type: "SAFETY",
+    message: `Propulsion DISARM request: ${result.message}`,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
+});
+
+app.post("/api/hardware/clear-estop", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Restricted to local host execution." });
+  }
+  const result = await hardwareAdapter.controller.clearEmergencyStop();
+  eventLogs.unshift({
+    type: "SAFETY",
+    message: `Clear ESTOP request: ${result.message}`,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
+});
+
+app.post("/api/hardware/motor-test", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Stage-1 motor bench test is restricted to local execution." });
+  }
+  const channel = Number(req.body?.channel ?? 1);
+  const pwm = Number(req.body?.pwm ?? 0);
+  const durationMs = Number(req.body?.durationMs ?? 500);
+  const result = await hardwareAdapter.controller.commandSingleMotor(channel, pwm, durationMs);
+  eventLogs.unshift({
+    type: result.ok ? "PROPULSION" : "WARNING",
+    message: `Stage-1 motor test (ch=${channel}, pwm=${pwm}, dur=${durationMs}ms): ${result.message}`,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
+});
+
+app.post("/api/hardware/servo-test", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Stage-1 servo bench test is restricted to local execution." });
+  }
+  const channel = Number(req.body?.channel ?? 1);
+  const angleDeg = Number(req.body?.angleDeg ?? 90);
+  const result = await hardwareAdapter.controller.commandSingleServo(channel, angleDeg);
+  eventLogs.unshift({
+    type: result.ok ? "PROPULSION" : "WARNING",
+    message: `Stage-1 servo test (ch=${channel}, angle=${angleDeg}deg): ${result.message}`,
+    time: new Date().toLocaleTimeString(),
+  });
+  res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
+});
+
+
 
 // Serve MJPEG live stream of simulated underwater view
 app.get("/video_feed", async (req, res) => {
@@ -1647,14 +1762,18 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, "0.0.0.0", async () => {
+    console.log(`Server running on http://0.0.0.0:${PORT} [Hardware Mode: ${hardwareAdapter.mode}]`);
+    if (hardwareAdapter.mode === "REAL" && hardwareAdapter.config.controller.serialPort) {
+      const conn = await hardwareAdapter.connectController();
+      logger.info(`[Hardware Startup] ${conn.message} (Propulsion remains DISARMED on startup)`);
+    }
   });
 }
 
 // On Vercel the app runs as a serverless function (see api/index.ts) — export it and skip listen().
 // Locally (tsx dev / node dist/server.cjs) we start a real HTTP server + Vite/static middleware.
-if (!process.env.VERCEL) {
+if (!process.env.VERCEL && !process.env.SKIP_SERVER_LISTEN) {
   startServer();
 }
 
