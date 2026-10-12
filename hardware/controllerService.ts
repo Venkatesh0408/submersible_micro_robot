@@ -228,7 +228,12 @@ export class ControllerCommunicationService {
     }
 
     // Perform explicit HELLO handshake before considering the controller ready
-    const helloRes = await this.sendRawCommand("HELLO", undefined, true);
+    const helloRes = await this.sendRawCommand(
+      "HELLO",
+      undefined,
+      true,
+      this.config.controller.handshakeTimeoutMs
+    );
     if (!helloRes.ok || !helloRes.confirmedByController) {
       await this.disconnect();
       const msg = `Controller handshake failed on '${targetTransport.portPath}': ${helloRes.message}`;
@@ -371,7 +376,8 @@ export class ControllerCommunicationService {
   private async sendRawCommand(
     cmd: string,
     params?: Record<string, string | number>,
-    allowBeforeHandshake: boolean = false
+    allowBeforeHandshake: boolean = false,
+    customTimeoutMs?: number
   ): Promise<CommandResult> {
     if (!this.transport || !this.transport.isOpen || !this._connected) {
       return {
@@ -408,7 +414,7 @@ export class ControllerCommunicationService {
       };
     }
 
-    const timeoutMs = this.config.controller.commandTimeoutMs;
+    const timeoutMs = customTimeoutMs ?? this.config.controller.commandTimeoutMs;
 
     return new Promise<CommandResult>((resolve) => {
       const timer = setTimeout(() => {
@@ -592,7 +598,7 @@ export class ControllerCommunicationService {
   }
 
   /**
-   * Bounded single-motor test command (Channel 1 only unless FULL_PROPULSION is explicitly verified).
+   * Bounded single-motor test command (Channel 1 only — Stage-1 firmware implements only Motor 1).
    * Enforces safe PWM limits and mandatory auto-shutoff duration.
    */
   public async commandSingleMotor(
@@ -636,14 +642,14 @@ export class ControllerCommunicationService {
         message: "Motor channel must be an integer between 1 and 4.",
       };
     }
-    if (channel > 1 && this.config.propulsion.allowedStage !== "FULL_PROPULSION") {
+    if (channel > 1) {
       return {
         ok: false,
         confirmedByController: false,
         cmd: "MOTOR",
         code: "MULTI_MOTOR_UNCONFIRMED",
         message:
-          "Only Channel 1 single-motor bench testing is enabled. Multi-motor control requires L298N_MODULE_COUNT >= 2 and THRUSTER_GEOMETRY_CONFIRMED=true.",
+          "Only Channel 1 single-motor bench testing is supported by Stage-1 firmware. Multi-motor propulsion remains disabled.",
       };
     }
     if (!Number.isFinite(pwm) || !Number.isFinite(durationMs)) {
@@ -686,7 +692,7 @@ export class ControllerCommunicationService {
   }
 
   /**
-   * Bounded single-servo angle command (Channel 1 only unless FULL_PROPULSION is explicitly verified).
+   * Bounded single-servo angle command (Channel 1 only — Stage-1 firmware implements only Servo 1).
    */
   public async commandSingleServo(
     channel: number,
@@ -728,14 +734,14 @@ export class ControllerCommunicationService {
         message: "Servo channel must be an integer between 1 and 4.",
       };
     }
-    if (channel > 1 && this.config.propulsion.allowedStage !== "FULL_PROPULSION") {
+    if (channel > 1) {
       return {
         ok: false,
         confirmedByController: false,
         cmd: "SERVO",
         code: "MULTI_SERVO_UNCONFIRMED",
         message:
-          "Only Channel 1 single-servo bench testing is enabled until THRUSTER_GEOMETRY_CONFIRMED=true.",
+          "Only Channel 1 single-servo bench testing is supported by Stage-1 firmware. Multi-servo vectoring remains disabled.",
       };
     }
 

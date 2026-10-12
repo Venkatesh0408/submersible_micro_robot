@@ -309,11 +309,13 @@ async function main() {
   // ----------------------------------------------------------
   console.log("\n3. ESP32-CAM Security & MJPEG Snapshot Extraction:");
 
-  await runTest("SSRF guard allows private RFC-1918 LAN IPs and rejects cloud metadata/public IPs", () => {
+  await runTest("SSRF guard allows private RFC-1918 LAN IPs and rejects loopback/cloud metadata/public IPs", () => {
     assert.equal(validateCamUrl("http://192.168.1.184:81/stream").ok, true);
     assert.equal(validateCamUrl("http://10.42.0.55/capture").ok, true);
     assert.equal(validateCamUrl("http://esp32cam.local/capture").ok, true);
 
+    assert.equal(validateCamUrl("http://127.0.0.1:3000/api/hardware/status").ok, false);
+    assert.equal(validateCamUrl("http://localhost:3000/api/health").ok, false);
     assert.equal(validateCamUrl("http://169.254.169.254/latest/meta-data").ok, false);
     assert.equal(validateCamUrl("http://8.8.8.8/stream").ok, false);
     assert.equal(validateCamUrl("ftp://192.168.1.50/file").ok, false);
@@ -334,11 +336,59 @@ async function main() {
   });
 
   // ----------------------------------------------------------
-  // 4. BACKEND API CONTRACT COMPATIBILITY TESTS (SIMULATION vs REAL)
+  // 4. BACKEND API CONTRACT & CONFIG ALIGNMENT TESTS
   // ----------------------------------------------------------
-  console.log("\n4. Frontend-Backend API Contract Compatibility:");
+  console.log("\n4. Frontend-Backend API Contract & Config Alignment:");
 
-  await runTest("Preserves exact Dashboard/SensorCard/HealthPanel array contracts in SIMULATION and REAL modes", async () => {
+  await runTest("Applies .env.example settings and keeps 4-motor full propulsion disabled for Stage-1 firmware", () => {
+    const cfg = loadHardwareConfig({
+      HARDWARE_MODE: "REAL",
+      CONTROLLER_BOARD: "ARDUINO_UNO_R3",
+      SERIAL_HANDSHAKE_TIMEOUT_MS: "4200",
+      STAGE1_MAX_PWM: "125",
+      STAGE1_MAX_DURATION_MS: "1800",
+      STAGE1_SERVO_MIN_DEG: "50",
+      STAGE1_SERVO_MAX_DEG: "130",
+      TEMPERATURE_SENSOR_INSTALLED: "true",
+      DEPTH_SENSOR_INSTALLED: "false",
+      GPS_MODULE_INSTALLED: "true",
+      ULTRASONIC_SENSOR_INSTALLED: "true",
+      BATTERY_SENSE_INSTALLED: "false",
+      PROPULSION_CONFIRMED: "true",
+      L298N_MODULE_COUNT: "2",
+      THRUSTER_GEOMETRY_CONFIRMED: "true",
+      TURBIDITY_CALIBRATED: "true",
+      TURBIDITY_CLEAR_WATER_VOLTAGE: "4.10",
+      TURBIDITY_REFERENCE_NTU_VOLTAGE: "2.50",
+      TURBIDITY_REFERENCE_NTU_VALUE: "1000",
+      ESP32_CAM_STREAM_URL: "http://192.168.1.50:81/stream",
+      ESP32_CAM_SNAPSHOT_URL: "http://192.168.1.50/capture",
+      ESP32_CAM_TIMEOUT_MS: "4500",
+    });
+
+    assert.equal(cfg.controller.handshakeTimeoutMs, 4200);
+    assert.equal(cfg.propulsion.maxSafeBenchPwm, 125);
+    assert.equal(cfg.propulsion.maxMotorDurationMs, 1800);
+    assert.equal(cfg.propulsion.servoMinDeg, 50);
+    assert.equal(cfg.propulsion.servoMaxDeg, 130);
+    assert.equal(cfg.sensors.temperature.installed, true);
+    assert.equal(cfg.sensors.depth.installed, false);
+    assert.equal(cfg.sensors.gps.installed, true);
+    assert.equal(cfg.sensors.ultrasonic.installed, true);
+    assert.equal(cfg.sensors.batterySense.installed, false);
+    assert.equal(cfg.sensors.turbidity.calibrated, true);
+    assert.ok(cfg.sensors.turbidity.calibrationSlope !== null);
+    assert.equal(cfg.camera.streamUrl, "http://192.168.1.50:81/stream");
+    assert.equal(cfg.camera.snapshotUrl, "http://192.168.1.50/capture");
+    assert.equal(cfg.camera.pingTimeoutMs, 4500);
+    assert.equal(cfg.camera.snapshotTimeoutMs, 4500);
+
+    // Full 4-motor propulsion must NEVER be enabled via env vars while firmware is Stage-1 only
+    assert.equal(cfg.propulsion.fullPropulsionSupportedByFirmware, false);
+    assert.equal(cfg.propulsion.allowedStage, "SINGLE_CHANNEL_BENCH");
+  });
+
+  await runTest("Preserves exact Dashboard/SensorCard/HealthPanel array contracts and never reports IMU pitch as Depth", async () => {
     const adapter = new HardwareAdapter(
       loadHardwareConfig({
         HARDWARE_MODE: "SIMULATION",
@@ -391,8 +441,20 @@ async function main() {
     assert.equal(simHealth.length, 6);
     assert.ok(simHealth.every((h) => typeof h.name === "string" && typeof h.status === "string"));
 
-    // Switch to REAL mode (while disconnected) -> verify NO simulated sensor values leak
+    // Switch to REAL mode and connect mock controller with active IMU pitch (1.5 deg)
     await adapter.setOperatingMode("REAL");
+    const transport = new MockSerialTransport("MOCK_COM3", {
+      onHostWrite: (line, t) => {
+        const m = line.match(/^VSTY\/1 seq=(\d+) (\S+)/);
+        if (!m) return;
+        t.receiveFromController(`VSTY/1 ACK seq=${m[1]} cmd=${m[2]} board=UNO_R3 fw=1.0.0 imu=0x70`);
+        t.receiveFromController(
+          "VSTY/1 TELEM uptime_ms=1000 armed=0 estop=0 turb_raw=700 imu_ok=1 who_am_i=0x70 ax=10 ay=20 az=16300 gx=0 gy=0 gz=0 roll=5 pitch=15 m1=0 s1=90"
+        );
+      },
+    });
+    await adapter.connectController(transport);
+
     const realSensors = adapter.getSensorsResponse(simRobotState);
     assert.ok(Array.isArray(realSensors));
     assert.equal(realSensors.length, 5);
@@ -403,17 +465,23 @@ async function main() {
     // Temperature & pH must report N/A (never simulated numbers)
     assert.equal(realSensors[0].value, "N/A");
     assert.equal(realSensors[1].value, "N/A");
-    // Disconnected turbidity must report ERR (not 14.5 NTU)
-    assert.equal(realSensors[2].value, "ERR");
+    // Depth card must report N/A (never IMU pitch!) even when IMU is online with pitch=1.5°
+    const depthCard = realSensors[3];
+    assert.equal(depthCard.name, "📏 Depth");
+    assert.equal(depthCard.value, "N/A");
+    assert.equal(depthCard.unit, "m");
+    assert.equal(depthCard.status, "WARNING");
+    assert.equal(depthCard.sensorState, "NOT_INSTALLED");
 
     const realTelemetry = adapter.getTelemetryResponse(simRobotState, []);
     assert.equal(realTelemetry.hardwareMode, "REAL");
     assert.equal(realTelemetry.simulated, false);
     assert.equal(realTelemetry.temperature, null);
     assert.equal(realTelemetry.ph, null);
-    assert.equal(realTelemetry.turbidity, null);
     assert.equal(realTelemetry.ultrasonic, null);
     assert.equal(realTelemetry.battery, 0);
+
+    await adapter.disconnectController();
   });
 
   console.log(`\n==========================================================`);

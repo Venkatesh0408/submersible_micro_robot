@@ -21,14 +21,20 @@ import { validateCamUrl } from "./hardware/cameraService.js";
 dotenv.config();
 
 export const hardwareAdapter = new HardwareAdapter();
-if (
-  hardwareAdapter.mode === "REAL" &&
-  hardwareAdapter.config.controller.serialPort &&
-  !hardwareAdapter.config.isCloudEnvironment
-) {
-  hardwareAdapter.connectController().catch((err) => {
-    logger.warn(`[hardware] Startup serial connect deferred: ${err?.message || err}`);
-  });
+
+/**
+ * Strict loopback guard for physical hardware-control endpoints.
+ * Inspects the raw TCP socket remoteAddress (ignoring X-Forwarded-For / req.ip)
+ * and never bypasses in development or for arbitrary LAN peers.
+ */
+export function isLocalRequest(req: express.Request): boolean {
+  if (hardwareAdapter.config.isCloudEnvironment) return false;
+  const remoteAddr = (req.socket?.remoteAddress || "").trim();
+  return (
+    remoteAddr === "127.0.0.1" ||
+    remoteAddr === "::1" ||
+    remoteAddr === "::ffff:127.0.0.1"
+  );
 }
 
 let ai = null;
@@ -473,24 +479,23 @@ app.post("/api/waypoints", (req, res) => {
 
 app.post("/api/start", (req, res) => {
   if (hardwareAdapter.mode === "REAL") {
-    if (!hardwareAdapter.controller.isConnected) {
-      return res.status(503).json({
+    if (!isLocalRequest(req)) {
+      return res.status(403).json({
         success: false,
-        status: "HARDWARE_DISCONNECTED",
+        status: "FORBIDDEN_REMOTE_HARDWARE_CONTROL",
         hardwareMode: "REAL",
         hardwareConfirmed: false,
-        message: "Cannot start physical mission: Arduino controller is not connected."
+        message: "Physical mission control is restricted to local host execution."
       });
     }
-    if (hardwareAdapter.config.propulsion.allowedStage !== "FULL_PROPULSION") {
-      return res.status(503).json({
-        success: false,
-        status: "PROPULSION_UNCONFIRMED",
-        hardwareMode: "REAL",
-        hardwareConfirmed: false,
-        message: "Autonomous multi-thruster mission is blocked in REAL mode until 2x L298N drivers and 4-motor thrust geometry are physically verified."
-      });
-    }
+    return res.status(503).json({
+      success: false,
+      status: "STAGE1_BENCH_ONLY",
+      hardwareMode: "REAL",
+      hardwareConfirmed: false,
+      message:
+        "Four-motor autonomous mission is disabled in REAL mode: Stage-1 firmware currently supports only one motor channel (M1) and one servo (S1) for bounded bench testing."
+    });
   }
 
   robotState.running = true;
@@ -516,6 +521,40 @@ app.post("/api/start", (req, res) => {
 });
 
 app.post("/api/pause", async (req, res) => {
+  if (hardwareAdapter.mode === "REAL") {
+    if (!isLocalRequest(req)) {
+      return res.status(403).json({
+        success: false,
+        status: "FORBIDDEN_REMOTE_HARDWARE_CONTROL",
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: "Physical mission control is restricted to local host execution."
+      });
+    }
+    robotState.running = false;
+    robotState.paused = false;
+    robotState.status = "HARDWARE_DISARMED_BY_PAUSE";
+
+    const stopRes = await hardwareAdapter.controller.stopPropulsion();
+    if (!stopRes.ok || !stopRes.confirmedByController) {
+      return res.status(503).json({
+        success: false,
+        status: robotState.status,
+        hardwareMode: "REAL",
+        hardwareConfirmed: false,
+        message: `${stopRes.message} (Autonomous pause/resume is disabled in REAL mode; propulsion is disarmed.)`
+      });
+    }
+
+    return res.json({
+      success: true,
+      status: robotState.status,
+      hardwareMode: "REAL",
+      hardwareConfirmed: true,
+      message: "Physical propulsion stopped and disarmed. Note: resume is disabled in REAL mode until safe re-arming is implemented."
+    });
+  }
+
   robotState.running = false;
   robotState.paused = true;
   robotState.status = "MISSION_PAUSED";
@@ -525,19 +564,6 @@ app.post("/api/pause", async (req, res) => {
     message: "Mission Paused",
     time: new Date().toLocaleTimeString()
   });
-
-  if (hardwareAdapter.mode === "REAL") {
-    const stopRes = await hardwareAdapter.controller.stopPropulsion();
-    if (!stopRes.ok || !stopRes.confirmedByController) {
-      return res.status(503).json({
-        success: false,
-        status: robotState.status,
-        hardwareMode: "REAL",
-        hardwareConfirmed: false,
-        message: stopRes.message
-      });
-    }
-  }
 
   res.json({
     success: true,
@@ -549,15 +575,23 @@ app.post("/api/pause", async (req, res) => {
 
 app.post("/api/resume", (req, res) => {
   if (hardwareAdapter.mode === "REAL") {
-    if (!hardwareAdapter.controller.isConnected || !hardwareAdapter.controller.isArmed) {
-      return res.status(503).json({
+    if (!isLocalRequest(req)) {
+      return res.status(403).json({
         success: false,
-        status: "HARDWARE_NOT_ARMED",
+        status: "FORBIDDEN_REMOTE_HARDWARE_CONTROL",
         hardwareMode: "REAL",
         hardwareConfirmed: false,
-        message: "Cannot resume physical mission: controller is disconnected or disarmed."
+        message: "Physical mission control is restricted to local host execution."
       });
     }
+    return res.status(503).json({
+      success: false,
+      status: "RESUME_DISABLED_IN_REAL_MODE",
+      hardwareMode: "REAL",
+      hardwareConfirmed: false,
+      message:
+        "Mission resume is disabled in REAL mode because pause disarms physical propulsion and 4-motor autonomous control is not implemented. Use /api/hardware/arm on the local host for bounded Stage-1 bench tests."
+    });
   }
 
   robotState.running = true;
@@ -626,6 +660,16 @@ app.post("/api/emergency-stop", async (req, res) => {
 });
 
 app.post("/api/stop", async (req, res) => {
+  if (hardwareAdapter.mode === "REAL" && !isLocalRequest(req)) {
+    return res.status(403).json({
+      success: false,
+      status: "FORBIDDEN_REMOTE_HARDWARE_CONTROL",
+      hardwareMode: "REAL",
+      hardwareConfirmed: false,
+      message: "Physical mission control is restricted to local host execution."
+    });
+  }
+
   robotState.running = false;
   robotState.paused = false;
   robotState.status = "MISSION_STOPPED";
@@ -1459,22 +1503,10 @@ app.get("/api/telemetry", (req, res) => {
 // ==========================================================
 // HARDWARE INTEGRATION & BENCH-TESTING API (/api/hardware/*)
 // ==========================================================
-function isLocalRequest(req: express.Request): boolean {
-  if (hardwareAdapter.config.isCloudEnvironment) return false;
-  const ip = req.ip || req.socket?.remoteAddress || "";
-  return (
-    ip === "127.0.0.1" ||
-    ip === "::1" ||
-    ip === "::ffff:127.0.0.1" ||
-    ip.startsWith("192.168.") ||
-    ip.startsWith("10.") ||
-    ip.startsWith("::ffff:192.168.") ||
-    ip.startsWith("::ffff:10.") ||
-    process.env.NODE_ENV !== "production"
-  );
-}
-
 app.get("/api/hardware/status", async (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ success: false, message: "Hardware diagnostics are restricted to local host execution." });
+  }
   const status = await hardwareAdapter.getDiagnosticsStatus();
   res.json(status);
 });

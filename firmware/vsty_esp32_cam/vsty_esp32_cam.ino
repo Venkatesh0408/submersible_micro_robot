@@ -115,7 +115,7 @@ static void startCameraServers() {
 void setup() {
   Serial.begin(115200);
 
-  camera_config_t config;
+  camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
   config.pin_d0       = Y2_GPIO_NUM;
@@ -130,15 +130,27 @@ void setup() {
   config.pin_pclk     = PCLK_GPIO_NUM;
   config.pin_vsync    = VSYNC_GPIO_NUM;
   config.pin_href     = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size   = FRAMESIZE_VGA;
-  config.jpeg_quality = 12;
-  config.fb_count     = 2;
+  config.sccb_i2c_port = 0;
+
+  if (psramFound()) {
+    config.frame_size   = FRAMESIZE_VGA;
+    config.jpeg_quality = 12;
+    config.fb_count     = 2;
+    config.fb_location  = CAMERA_FB_IN_PSRAM;
+    config.grab_mode    = CAMERA_GRAB_LATEST;
+  } else {
+    config.frame_size   = FRAMESIZE_CIF;
+    config.jpeg_quality = 14;
+    config.fb_count     = 1;
+    config.fb_location  = CAMERA_FB_IN_DRAM;
+    config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
+  }
 
   if (esp_camera_init(&config) != ESP_OK) {
     Serial.println("ERR: ESP32-CAM init failed");

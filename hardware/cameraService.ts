@@ -51,7 +51,7 @@ export function validateCamUrl(raw: string): CamUrlValidation {
     return { ok: false, reason: "Only http/https is allowed" };
   }
   const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local")) {
+  if (host.endsWith(".local")) {
     return { ok: true, parsedUrl: url };
   }
   const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -65,7 +65,6 @@ export function validateCamUrl(raw: string): CamUrlValidation {
   const b = Number(m[2]);
   const isPrivate =
     a === 10 ||
-    a === 127 ||
     (a === 192 && b === 168) ||
     (a === 172 && b >= 16 && b <= 31);
   if (!isPrivate) {
@@ -111,12 +110,18 @@ export class Esp32CameraService {
   }
 
   public getDefaultStreamUrl(): string {
+    if (this.config.camera.streamUrl) {
+      return this.config.camera.streamUrl;
+    }
     const { defaultIp, defaultStreamPort, defaultStreamPath } = this.config.camera;
     const p = defaultStreamPath.startsWith("/") ? defaultStreamPath : `/${defaultStreamPath}`;
     return `http://${defaultIp}:${defaultStreamPort}${p}`;
   }
 
   public getDefaultCaptureUrl(): string {
+    if (this.config.camera.snapshotUrl) {
+      return this.config.camera.snapshotUrl;
+    }
     const { defaultIp, defaultCapturePort, defaultCapturePath } = this.config.camera;
     const p = defaultCapturePath.startsWith("/") ? defaultCapturePath : `/${defaultCapturePath}`;
     return `http://${defaultIp}:${defaultCapturePort}${p}`;

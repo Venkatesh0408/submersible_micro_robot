@@ -4,7 +4,7 @@ dotenv.config();
 
 export type HardwareOperatingMode = "SIMULATION" | "REAL";
 export type ControllerBoardModel = "ARDUINO_UNO_R3" | "ARDUINO_NANO" | "UNCONFIRMED";
-export type PropulsionStage = "DISABLED" | "SINGLE_CHANNEL_BENCH" | "FULL_PROPULSION";
+export type PropulsionStage = "DISABLED" | "SINGLE_CHANNEL_BENCH";
 
 export interface HardwareConfig {
   mode: HardwareOperatingMode;
@@ -13,6 +13,7 @@ export interface HardwareConfig {
     boardModel: ControllerBoardModel;
     serialPort: string;
     baudRate: number;
+    handshakeTimeoutMs: number;
     commandTimeoutMs: number;
     telemetryStaleMs: number;
     watchdogTimeoutMs: number;
@@ -48,11 +49,18 @@ export interface HardwareConfig {
     ph: {
       installed: boolean;
     };
+    depth: {
+      installed: boolean;
+    };
+    batterySense: {
+      installed: boolean;
+    };
   };
   propulsion: {
     confirmedByEngineer: boolean;
     l298nModuleCount: number;
     thrusterGeometryConfirmed: boolean;
+    fullPropulsionSupportedByFirmware: false;
     allowedStage: PropulsionStage;
     motorRatedVoltageV: number;
     batteryNominalVoltageV: number;
@@ -69,6 +77,8 @@ export interface HardwareConfig {
     };
   };
   camera: {
+    streamUrl: string;
+    snapshotUrl: string;
     defaultIp: string;
     defaultStreamPort: number;
     defaultCapturePort: number;
@@ -96,6 +106,41 @@ function parseBoardModel(raw: string | undefined): ControllerBoardModel {
   return "UNCONFIRMED";
 }
 
+function resolveTurbidityCalibration(env: NodeJS.ProcessEnv): {
+  calibrated: boolean;
+  slope: number | null;
+  offset: number | null;
+} {
+  if (env.TURBIDITY_CALIBRATED !== "true") {
+    return { calibrated: false, slope: null, offset: null };
+  }
+
+  // Option A: Direct linear calibration constants (NTU = slope * V + offset)
+  const directSlope = parseOptionalNumber(env.TURBIDITY_CAL_SLOPE);
+  const directOffset = parseOptionalNumber(env.TURBIDITY_CAL_OFFSET);
+  if (directSlope !== null && directOffset !== null) {
+    return { calibrated: true, slope: directSlope, offset: directOffset };
+  }
+
+  // Option B: Two-point reference standards from .env.example
+  const clearV = parseOptionalNumber(env.TURBIDITY_CLEAR_WATER_VOLTAGE);
+  const refV = parseOptionalNumber(env.TURBIDITY_REFERENCE_NTU_VOLTAGE);
+  const refNtu = parseOptionalNumber(env.TURBIDITY_REFERENCE_NTU_VALUE);
+  if (
+    clearV !== null &&
+    refV !== null &&
+    refNtu !== null &&
+    Math.abs(refV - clearV) > 0.05 &&
+    refNtu > 0
+  ) {
+    const slope = refNtu / (refV - clearV);
+    const offset = -slope * clearV;
+    return { calibrated: true, slope, offset };
+  }
+
+  return { calibrated: false, slope: null, offset: null };
+}
+
 export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): HardwareConfig {
   const rawMode = (env.HARDWARE_MODE || "SIMULATION").trim().toUpperCase();
   const mode: HardwareOperatingMode = rawMode === "REAL" ? "REAL" : "SIMULATION";
@@ -107,19 +152,21 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
   const l298nModuleCount = Math.max(0, parseInt(env.L298N_MODULE_COUNT || "0", 10) || 0);
   const thrusterGeometryConfirmed = env.THRUSTER_GEOMETRY_CONFIRMED === "true";
 
+  // Stage-1 firmware (`vsty_uno_controller.ino`) supports ONLY 1 motor channel (M1) and 1 servo (S1).
+  // Never enable 4-motor full propulsion merely by setting environment variables.
   let allowedStage: PropulsionStage = "DISABLED";
   if (confirmedByEngineer && boardModel !== "UNCONFIRMED" && l298nModuleCount >= 1) {
-    if (l298nModuleCount >= 2 && thrusterGeometryConfirmed) {
-      allowedStage = "FULL_PROPULSION";
-    } else {
-      allowedStage = "SINGLE_CHANNEL_BENCH";
-    }
+    allowedStage = "SINGLE_CHANNEL_BENCH";
   }
 
-  const calSlope = parseOptionalNumber(env.TURBIDITY_CAL_SLOPE);
-  const calOffset = parseOptionalNumber(env.TURBIDITY_CAL_OFFSET);
-  const turbidityCalibrated =
-    env.TURBIDITY_CALIBRATED === "true" && calSlope !== null && calOffset !== null;
+  const turbCal = resolveTurbidityCalibration(env);
+
+  const maxPwmRaw = env.STAGE1_MAX_PWM || env.MAX_SAFE_BENCH_PWM || "140";
+  const maxDurRaw = env.STAGE1_MAX_DURATION_MS || env.MAX_MOTOR_DURATION_MS || "2000";
+  const servoMinRaw = env.STAGE1_SERVO_MIN_DEG || env.SERVO_MIN_DEG || "45";
+  const servoMaxRaw = env.STAGE1_SERVO_MAX_DEG || env.SERVO_MAX_DEG || "135";
+
+  const camTimeoutDefault = parseInt(env.ESP32_CAM_TIMEOUT_MS || "5000", 10) || 5000;
 
   return {
     mode,
@@ -128,6 +175,7 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
       boardModel,
       serialPort: (env.SERIAL_PORT || "").trim(),
       baudRate: parseInt(env.SERIAL_BAUD_RATE || "115200", 10) || 115200,
+      handshakeTimeoutMs: parseInt(env.SERIAL_HANDSHAKE_TIMEOUT_MS || "3500", 10) || 3500,
       commandTimeoutMs: parseInt(env.SERIAL_COMMAND_TIMEOUT_MS || "1500", 10) || 1500,
       telemetryStaleMs: parseInt(env.TELEMETRY_STALE_MS || "3000", 10) || 3000,
       watchdogTimeoutMs: parseInt(env.CONTROLLER_WATCHDOG_MS || "2000", 10) || 2000,
@@ -135,48 +183,56 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
     },
     sensors: {
       turbidity: {
-        installed: env.TURBIDITY_INSTALLED !== "false", // Primary target sensor
+        installed: env.TURBIDITY_INSTALLED !== "false",
         analogPin: (env.TURBIDITY_ANALOG_PIN || "A0").trim(),
         adcResolutionBits: 10,
         vRefVolts: parseFloat(env.CONTROLLER_VREF_VOLTS || "5.0") || 5.0,
-        // Extreme rail values (0 or 1023) typically indicate open/short fault on analog sensor lines
         minValidAdc: parseInt(env.TURBIDITY_MIN_VALID_ADC || "5", 10) || 5,
         maxValidAdc: parseInt(env.TURBIDITY_MAX_VALID_ADC || "1018", 10) || 1018,
-        calibrated: turbidityCalibrated,
-        calibrationSlope: calSlope,
-        calibrationOffset: calOffset,
+        calibrated: turbCal.calibrated,
+        calibrationSlope: turbCal.slope,
+        calibrationOffset: turbCal.offset,
       },
       imu: {
         installed: env.IMU_INSTALLED !== "false",
         i2cAddressHex: "0x68",
-        expectedWhoAmIHex: "0x70", // MPU-6500 WHO_AM_I register value verified at 0x68
+        expectedWhoAmIHex: "0x70",
       },
       gps: {
-        installed: env.GPS_INSTALLED === "true",
+        installed: env.GPS_MODULE_INSTALLED === "true" || env.GPS_INSTALLED === "true",
         surfaceOnlyWarning:
           "NEO-6M GPS is a surface-only positioning aid. RF satellite signals do not penetrate water reliably.",
       },
       ultrasonic: {
-        installed: env.ULTRASONIC_INSTALLED === "true",
+        installed:
+          env.ULTRASONIC_SENSOR_INSTALLED === "true" || env.ULTRASONIC_INSTALLED === "true",
       },
       temperature: {
-        installed: env.TEMP_SENSOR_INSTALLED === "true",
+        installed:
+          env.TEMPERATURE_SENSOR_INSTALLED === "true" || env.TEMP_SENSOR_INSTALLED === "true",
       },
       ph: {
         installed: env.PH_SENSOR_INSTALLED === "true",
+      },
+      depth: {
+        installed: env.DEPTH_SENSOR_INSTALLED === "true",
+      },
+      batterySense: {
+        installed: env.BATTERY_SENSE_INSTALLED === "true",
       },
     },
     propulsion: {
       confirmedByEngineer,
       l298nModuleCount,
       thrusterGeometryConfirmed,
+      fullPropulsionSupportedByFirmware: false,
       allowedStage,
       motorRatedVoltageV: parseFloat(env.MOTOR_RATED_VOLTAGE_V || "12.0") || 12.0,
       batteryNominalVoltageV: parseFloat(env.BATTERY_NOMINAL_VOLTAGE_V || "11.1") || 11.1,
-      maxSafeBenchPwm: Math.min(255, Math.max(0, parseInt(env.MAX_SAFE_BENCH_PWM || "180", 10) || 180)),
-      maxMotorDurationMs: Math.min(5000, Math.max(100, parseInt(env.MAX_MOTOR_DURATION_MS || "3000", 10) || 3000)),
-      servoMinDeg: Math.max(0, parseInt(env.SERVO_MIN_DEG || "45", 10) || 45),
-      servoMaxDeg: Math.min(180, parseInt(env.SERVO_MAX_DEG || "135", 10) || 135),
+      maxSafeBenchPwm: Math.min(180, Math.max(0, parseInt(maxPwmRaw, 10) || 140)),
+      maxMotorDurationMs: Math.min(3000, Math.max(100, parseInt(maxDurRaw, 10) || 2000)),
+      servoMinDeg: Math.max(45, parseInt(servoMinRaw, 10) || 45),
+      servoMaxDeg: Math.min(135, parseInt(servoMaxRaw, 10) || 135),
       servoNeutralDeg: parseInt(env.SERVO_NEUTRAL_DEG || "90", 10) || 90,
       pins: {
         motor1EnaPin: (env.MOTOR1_ENA_PIN || "D5").trim(),
@@ -186,13 +242,24 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
       },
     },
     camera: {
+      streamUrl: (env.ESP32_CAM_STREAM_URL || "").trim(),
+      snapshotUrl: (env.ESP32_CAM_SNAPSHOT_URL || "").trim(),
       defaultIp: (env.ESP32_CAM_IP || env.VITE_ESP_DEFAULT_IP || "192.168.1.100").trim(),
-      defaultStreamPort: parseInt(env.ESP32_CAM_STREAM_PORT || env.VITE_ESP_DEFAULT_PORT || "81", 10) || 81,
+      defaultStreamPort:
+        parseInt(env.ESP32_CAM_STREAM_PORT || env.VITE_ESP_DEFAULT_PORT || "81", 10) || 81,
       defaultCapturePort: parseInt(env.ESP32_CAM_CAPTURE_PORT || "80", 10) || 80,
-      defaultStreamPath: (env.ESP32_CAM_STREAM_PATH || env.VITE_ESP_DEFAULT_PATH || "/stream").trim(),
+      defaultStreamPath: (
+        env.ESP32_CAM_STREAM_PATH ||
+        env.VITE_ESP_DEFAULT_PATH ||
+        "/stream"
+      ).trim(),
       defaultCapturePath: (env.ESP32_CAM_CAPTURE_PATH || "/capture").trim(),
-      pingTimeoutMs: parseInt(env.ESP32_CAM_PING_TIMEOUT_MS || "3000", 10) || 3000,
-      snapshotTimeoutMs: parseInt(env.ESP32_CAM_SNAPSHOT_TIMEOUT_MS || "5000", 10) || 5000,
+      pingTimeoutMs:
+        parseInt(env.ESP32_CAM_PING_TIMEOUT_MS || String(camTimeoutDefault), 10) ||
+        camTimeoutDefault,
+      snapshotTimeoutMs:
+        parseInt(env.ESP32_CAM_SNAPSHOT_TIMEOUT_MS || String(camTimeoutDefault), 10) ||
+        camTimeoutDefault,
     },
   };
 }

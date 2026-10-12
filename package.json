@@ -55,6 +55,7 @@
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.18.1",
     "react-webcam": "^7.2.0",
+    "serialport": "^13.0.0",
     "tailwindcss": "^4.1.14",
     "three": "^0.185.1",
     "tsx": "^4.23.12",

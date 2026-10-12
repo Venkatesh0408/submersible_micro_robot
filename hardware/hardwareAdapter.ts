@@ -160,7 +160,6 @@ export class HardwareAdapter {
 
     // REAL HARDWARE MODE — strictly honest sensor reporting; zero fabricated readings
     const turb = this.controller.evaluateTurbidity();
-    const imu = this.controller.evaluateImu();
 
     return [
       {
@@ -207,32 +206,30 @@ export class HardwareAdapter {
       },
       {
         name: "📏 Depth",
-        value: imu.imuOk && imu.pitchDeg !== null ? `Pitch ${imu.pitchDeg.toFixed(1)}°` : "N/A",
-        unit: "",
-        status: imu.imuOk ? "OK" : "WARNING",
-        error: imu.imuOk
-          ? null
-          : "Depth pressure sensor not installed; MPU-6500 IMU orientation unavailable.",
-        solution: imu.imuOk
-          ? null
-          : "Connect Arduino controller and verify MPU-6500 IMU at I2C 0x68 (WHO_AM_I=0x70).",
+        value: "N/A",
+        unit: "m",
+        status: "WARNING",
+        error: this.config.sensors.depth.installed
+          ? "Depth pressure sensor telemetry not received from controller."
+          : "Depth pressure sensor is not installed in the current physical build.",
+        solution:
+          "Install and wire a waterproof pressure/depth transducer before enabling depth measurements. IMU pitch is orientation data, not depth.",
         simulated: false,
         hardwareMode: "REAL",
-        sensorState: imu.state,
-        imuRollDeg: imu.rollDeg,
-        imuPitchDeg: imu.pitchDeg,
-        imuWhoAmI: imu.whoAmI,
+        sensorState: this.config.sensors.depth.installed ? "DISCONNECTED" : "NOT_INSTALLED",
       },
       {
         name: "🔋 12V Li-Ion Battery",
-        value: "Unmonitored",
-        unit: "",
+        value: "N/A",
+        unit: "%",
         status: "WARNING",
-        error: "3S 11.1V LiPo voltage divider sense line is not wired to Arduino ADC.",
+        error: this.config.sensors.batterySense.installed
+          ? "Battery voltage sense telemetry not received from controller."
+          : "3S 11.1V LiPo voltage divider sense line is not wired to Arduino ADC.",
         solution: "Use an external LiPo low-voltage buzzer/checker on the 3S balance lead during operation.",
         simulated: false,
         hardwareMode: "REAL",
-        sensorState: "NOT_INSTALLED",
+        sensorState: this.config.sensors.batterySense.installed ? "DISCONNECTED" : "NOT_INSTALLED",
       },
     ];
   }
