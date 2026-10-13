@@ -235,6 +235,20 @@ async function runTests() {
     });
     assert.equal(mediaAnonRes.status, 401, "Expected 401 for unauthenticated media writes");
 
+    const gpsWriteAnonRes = await fetch(`${baseUrl}/api/gps`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ latitude: 12.9, longitude: 77.5 }),
+    });
+    assert.equal(gpsWriteAnonRes.status, 401, "Expected 401 for unauthenticated shared GPS state mutation");
+
+    const waypointWriteAnonRes = await fetch(`${baseUrl}/api/waypoints`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ waypoints: [{ lat: 12.9, lng: 77.5 }] }),
+    });
+    assert.equal(waypointWriteAnonRes.status, 401, "Expected 401 for unauthenticated shared waypoint mutation");
+
     const imageAnonRes = await fetch(`${baseUrl}/api/analyze-image`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
