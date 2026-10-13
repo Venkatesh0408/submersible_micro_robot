@@ -462,7 +462,7 @@ app.get("/api/gps", (req, res) => {
   });
 });
 
-app.post("/api/gps", (req, res) => {
+app.post("/api/gps", requireAuthenticatedUser, (req, res) => {
   const { latitude, longitude } = req.body;
   if (typeof latitude === "number" && typeof longitude === "number" && !isNaN(latitude) && !isNaN(longitude)) {
     HOME_LATITUDE = latitude;
@@ -483,7 +483,7 @@ const waypointSchema = z.object({
   ).min(1)
 });
 
-app.post("/api/waypoints", (req, res) => {
+app.post("/api/waypoints", requireAuthenticatedUser, (req, res) => {
   const result = waypointSchema.safeParse(req.body);
   if (!result.success) {
     logger.warn(`Invalid waypoints payload from IP: ${req.ip}`);
