@@ -257,6 +257,11 @@ async function runTests() {
     });
     assert.equal(operatorAuditRes.status, 403, "Expected 403 for non-admin audit-log access");
 
+    const cookieAuditRes = await fetch(`${baseUrl}/api/auth/audit-logs`, {
+      headers: { Cookie: setCookieHeader.split(";")[0] },
+    });
+    assert.equal(cookieAuditRes.status, 403, "Expected the HttpOnly session cookie to authenticate an operator but not grant admin access");
+
     const statusRes = await fetch(`${baseUrl}/api/auth/status`);
     assert.equal(statusRes.status, 200);
     const statusData = await statusRes.json();
