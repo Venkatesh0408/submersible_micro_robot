@@ -465,15 +465,6 @@ export class SupabaseRpcAuthStore implements AuthStoreAdapter {
       }
     }
 
-    // Any env var value starting with sb_secret_
-    for (const [k, rawVal] of Object.entries(process.env)) {
-      const v = rawVal?.trim();
-      if (v && v.startsWith("sb_secret_") && !seen.has(v)) {
-        out.push({ envKey: k, value: v });
-        seen.add(v);
-      }
-    }
-
     if (this.anonKey && !seen.has(this.anonKey)) {
       out.push({ envKey: "SUPABASE_ANON_KEY", value: this.anonKey });
       seen.add(this.anonKey);
@@ -500,26 +491,21 @@ export class SupabaseRpcAuthStore implements AuthStoreAdapter {
       }
     }
 
-    for (const [k, rawVal] of Object.entries(process.env)) {
-      if (!rawVal) continue;
-      if (/SECRET|PASSWORD|TOKEN|KEY/i.test(k) && !/^VITE_|^npm_|^ANTIGRAVITY_/i.test(k)) {
-        const v = rawVal.trim();
-        if (v && !seen.has(v)) {
-          out.push({ envKey: k, value: v });
-          seen.add(v);
-        }
-      }
-    }
-
     return out;
   }
 
   private buildHeaders(apiKey: string, secretValue?: string): Record<string, string> {
     const headers: Record<string, string> = {
       apikey: apiKey,
-      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     };
+
+    // Legacy anon/service_role keys are JWTs; modern sb_secret keys are not.
+    // Supabase requires modern secret keys on apikey only (not Authorization: Bearer).
+    if (!apiKey.startsWith("sb_secret_")) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
     if (secretValue) {
       for (const h of SECRET_HEADER_NAMES) {
         headers[h] = secretValue;
