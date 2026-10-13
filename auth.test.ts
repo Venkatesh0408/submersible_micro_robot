@@ -274,7 +274,7 @@ async function runTests() {
     console.log("  PASS");
 
     // 9. SupabaseRpcAuthStore unit test (verifying RPC payloads, secret headers, and error mapping)
-    console.log("Test 8: Verify SupabaseRpcAuthStore RPC calls and backend secret header handling...");
+    console.log("Test 9: Verify SupabaseRpcAuthStore RPC calls, explicit secret headers, and error mapping...");
     const realFetch = globalThis.fetch;
     process.env.MC_BACKEND_SECRET = "test-shared-rpc-secret";
     const rpcCalls: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
