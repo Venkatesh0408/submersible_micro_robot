@@ -139,8 +139,10 @@ function notifyClients(message) {
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json({ limit: "500mb" }));
-app.use(express.urlencoded({ extended: true, limit: "500mb" }));
+// Inspection images are limited to 50M characters below; leave headroom for JSON
+// overhead, but avoid allowing unauthenticated requests to allocate 500MB bodies.
+app.use(express.json({ limit: "60mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000");
 const maxRequests = 10000; // Hardcoded to prevent interval fetch drops
@@ -803,8 +805,21 @@ app.get("/api/settings", (req, res) => {
 });
 
 // Camera image capture API
-app.post("/capture", async (req, res) => {
+app.post("/capture", (req, res, next) => {
+  // Guest capture remains available in SIMULATION mode. Physical capture is
+  // authenticated and loopback-only to prevent remote use of the camera device.
+  if (hardwareAdapter.mode === "REAL") return requireAuthenticatedUser(req, res, next);
+  return next();
+}, async (req, res) => {
   if (hardwareAdapter.mode === "REAL") {
+    if (!isLocalRequest(req)) {
+      return res.status(403).json({
+        success: false,
+        simulated: false,
+        hardwareMode: "REAL",
+        message: "Physical camera capture is restricted to local host execution."
+      });
+    }
     const targetUrl =
       hardwareAdapter.camera.status.targetUrl ||
       hardwareAdapter.camera.getDefaultCaptureUrl();
@@ -1133,6 +1148,17 @@ const generate3dLimiter = rateLimit({
   message: { error: "Too many 3D generations from this IP. Please wait a few minutes." },
 });
 
+// Shared limiter for other billable AI endpoints; authentication runs after the
+// limiter so anonymous callers cannot bypass the request budget.
+const aiActionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
+  message: { success: false, message: "Too many AI requests. Please wait a few minutes." },
+});
+
 async function triposrCall(fn: string, data: any[], timeoutMs: number, signal?: AbortSignal): Promise<any[]> {
   const HF = process.env.HF_API_TOKEN;
   const H: Record<string, string> = HF ? { Authorization: `Bearer ${HF}` } : {};
@@ -1228,7 +1254,7 @@ app.post("/api/generate-3d", generate3dLimiter, requireAuthenticatedUser, async 
 });
 
 // Gemini AI Image Analysis API
-app.post("/api/analyze-image", requireAuthenticatedUser, async (req, res) => {
+app.post("/api/analyze-image", aiActionLimiter, requireAuthenticatedUser, async (req, res) => {
   const { image, missionName, inspectionArea } = req.body || {};
   const safeMissionName = xss(missionName || "MANUAL");
   const safeInspectionArea = xss(inspectionArea || "Unknown");
@@ -1437,7 +1463,7 @@ app.get("/api/detections", requireAuthenticatedUser, async (req, res) => {
 });
 
 // Get AI stats
-app.post("/api/maps-grounding", requireAuthenticatedUser, async (req, res) => {
+app.post("/api/maps-grounding", aiActionLimiter, requireAuthenticatedUser, async (req, res) => {
   try {
     const { query, latitude, longitude } = req.body || {};
     const lat = typeof latitude === "number" && !isNaN(latitude) ? latitude : 12.9082;
