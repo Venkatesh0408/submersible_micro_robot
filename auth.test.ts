@@ -11,6 +11,9 @@ import {
 } from "./authStore.js";
 
 process.env.SKIP_SERVER_LISTEN = "true";
+// Keep integration tests deterministic and ensure guest control requests remain simulation-only.
+process.env.NODE_ENV = "test";
+process.env.HARDWARE_MODE = "SIMULATION";
 
 async function runTests() {
   console.log("=== VSTY Mission Control Authentication Test Suite ===");
@@ -220,8 +223,77 @@ async function runTests() {
     assert.equal(loginAfterRestartData.user.phone, null);
     console.log("  PASS");
 
-    // 8. SupabaseRpcAuthStore unit test (verifying RPC payloads, secret headers, and error mapping)
-    console.log("Test 8: Verify SupabaseRpcAuthStore RPC calls and backend secret header handling...");
+    // 8. API authorization: sensitive data and billable operations require a registered session.
+    console.log("Test 8: Protect saved history, media writes, billable AI endpoints, and audit logs...");
+    const historyAnonRes = await fetch(`${baseUrl}/api/analysis-history`);
+    assert.equal(historyAnonRes.status, 401, "Expected 401 for unauthenticated saved-history access");
+
+    const mediaAnonRes = await fetch(`${baseUrl}/api/media/upload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "should-not-be-created.jpg", fileData: "ZmFrZQ==" }),
+    });
+    assert.equal(mediaAnonRes.status, 401, "Expected 401 for unauthenticated media writes");
+
+    const gpsWriteAnonRes = await fetch(`${baseUrl}/api/gps`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ latitude: 12.9, longitude: 77.5 }),
+    });
+    assert.equal(gpsWriteAnonRes.status, 401, "Expected 401 for unauthenticated shared GPS state mutation");
+
+    const waypointWriteAnonRes = await fetch(`${baseUrl}/api/waypoints`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ waypoints: [{ lat: 12.9, lng: 77.5 }] }),
+    });
+    assert.equal(waypointWriteAnonRes.status, 401, "Expected 401 for unauthenticated shared waypoint mutation");
+
+    const imageAnonRes = await fetch(`${baseUrl}/api/analyze-image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: "data:image/jpeg;base64,ZmFrZQ==" }),
+    });
+    assert.equal(imageAnonRes.status, 401, "Expected 401 before calling the image-analysis provider");
+
+    const mapAnonRes = await fetch(`${baseUrl}/api/maps-grounding`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "test" }),
+    });
+    assert.equal(mapAnonRes.status, 401, "Expected 401 before calling the Maps/AI provider");
+
+    const auditAnonRes = await fetch(`${baseUrl}/api/auth/audit-logs`);
+    assert.equal(auditAnonRes.status, 401, "Expected 401 for unauthenticated audit-log access");
+
+    const operatorAuditRes = await fetch(`${baseUrl}/api/auth/audit-logs`, {
+      headers: { Authorization: `Bearer ${loginOkData.token}` },
+    });
+    assert.equal(operatorAuditRes.status, 403, "Expected 403 for non-admin audit-log access");
+
+    const cookieAuditRes = await fetch(`${baseUrl}/api/auth/audit-logs`, {
+      headers: { Cookie: setCookieHeader.split(";")[0] },
+    });
+    assert.equal(cookieAuditRes.status, 403, "Expected the HttpOnly session cookie to authenticate an operator but not grant admin access");
+
+    const statusRes = await fetch(`${baseUrl}/api/auth/status`);
+    assert.equal(statusRes.status, 200);
+    const statusData = await statusRes.json();
+    assert.equal(statusData.configuredEnvKeys, undefined, "Public status must not reveal environment-variable names");
+    assert.equal(statusData.winningSecretEnvKey, undefined, "Public status must not reveal the selected secret variable");
+
+    // Guest mode remains useful for the public demo and simulated mission controls.
+    const healthAnonRes = await fetch(`${baseUrl}/api/health`);
+    assert.equal(healthAnonRes.status, 200, "Expected public health data for the demo");
+
+    const guestStartRes = await fetch(`${baseUrl}/api/start`, { method: "POST" });
+    assert.equal(guestStartRes.status, 200, "Expected guest simulation start to remain available");
+    const guestStopRes = await fetch(`${baseUrl}/api/stop`, { method: "POST" });
+    assert.equal(guestStopRes.status, 200, "Expected guest simulation stop to remain available");
+    console.log("  PASS");
+
+    // 9. SupabaseRpcAuthStore unit test (verifying RPC payloads, secret headers, and error mapping)
+    console.log("Test 9: Verify SupabaseRpcAuthStore RPC calls, explicit secret headers, and error mapping...");
     const realFetch = globalThis.fetch;
     process.env.MC_BACKEND_SECRET = "test-shared-rpc-secret";
     const rpcCalls: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
@@ -323,7 +395,7 @@ async function runTests() {
       delete process.env.MC_BACKEND_SECRET;
     }
 
-    console.log("\nALL 8 AUTHENTICATION TESTS PASSED!");
+    console.log("\nALL 9 AUTHENTICATION TEST GROUPS PASSED!");
   } finally {
     setAuthStore(originalStore);
     await new Promise<void>((resolve) => server.close(() => resolve()));

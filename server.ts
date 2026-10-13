@@ -38,6 +38,50 @@ export function isLocalRequest(req: express.Request): boolean {
   );
 }
 
+
+/**
+ * Verify a real username/password session for sensitive API routes.
+ * Guest mode remains available for the demo and simulation-control routes,
+ * but it cannot access saved history, persistent uploads, or billable AI endpoints.
+ */
+function requireAuthenticatedUser(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization;
+  const bearerToken = typeof authHeader === "string" && /^Bearer\s+/i.test(authHeader)
+    ? authHeader.replace(/^Bearer\s+/i, "").trim()
+    : "";
+  const cookieToken = typeof (req as any).cookies?.token === "string"
+    ? (req as any).cookies.token
+    : "";
+  const token = bearerToken || cookieToken;
+
+  if (!token) {
+    return res.status(401).json({ success: false, code: "AUTH_REQUIRED", message: "Sign in to use this feature." });
+  }
+  if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+    return res.status(503).json({ success: false, code: "AUTH_NOT_CONFIGURED", message: "Authentication is not configured on the server." });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "dev-only-insecure-secret-change-me") as any;
+    if (!decoded || typeof decoded.username !== "string" || !decoded.username || decoded.role === "guest") {
+      return res.status(403).json({ success: false, code: "AUTH_FORBIDDEN", message: "A registered account is required." });
+    }
+    (req as any).user = decoded;
+    return next();
+  } catch {
+    return res.status(401).json({ success: false, code: "AUTH_INVALID", message: "Your session is invalid or expired. Please sign in again." });
+  }
+}
+
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  return requireAuthenticatedUser(req, res, () => {
+    if ((req as any).user?.role !== "admin") {
+      return res.status(403).json({ success: false, code: "ADMIN_REQUIRED", message: "Administrator access is required." });
+    }
+    return next();
+  });
+}
+
 let ai = null;
 function getAI() {
   if (!ai) {
@@ -60,6 +104,8 @@ app.use(helmet({
     crossOriginEmbedderPolicy: false,
 }));
 app.use(cors());
+// Parse the session cookie before route-level authentication middleware runs.
+app.use(cookieParser());
 
 // SSE Notification Clients
 let notificationClients = [];
@@ -93,8 +139,10 @@ function notifyClients(message) {
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json({ limit: "500mb" }));
-app.use(express.urlencoded({ extended: true, limit: "500mb" }));
+// Inspection images are limited to 50M characters below; leave headroom for JSON
+// overhead, but avoid allowing unauthenticated requests to allocate 500MB bodies.
+app.use(express.json({ limit: "60mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000");
 const maxRequests = 10000; // Hardcoded to prevent interval fetch drops
@@ -414,7 +462,7 @@ app.get("/api/gps", (req, res) => {
   });
 });
 
-app.post("/api/gps", (req, res) => {
+app.post("/api/gps", requireAuthenticatedUser, (req, res) => {
   const { latitude, longitude } = req.body;
   if (typeof latitude === "number" && typeof longitude === "number" && !isNaN(latitude) && !isNaN(longitude)) {
     HOME_LATITUDE = latitude;
@@ -435,7 +483,7 @@ const waypointSchema = z.object({
   ).min(1)
 });
 
-app.post("/api/waypoints", (req, res) => {
+app.post("/api/waypoints", requireAuthenticatedUser, (req, res) => {
   const result = waypointSchema.safeParse(req.body);
   if (!result.success) {
     logger.warn(`Invalid waypoints payload from IP: ${req.ip}`);
@@ -757,8 +805,21 @@ app.get("/api/settings", (req, res) => {
 });
 
 // Camera image capture API
-app.post("/capture", async (req, res) => {
+app.post("/capture", (req, res, next) => {
+  // Guest capture remains available in SIMULATION mode. Physical capture is
+  // authenticated and loopback-only to prevent remote use of the camera device.
+  if (hardwareAdapter.mode === "REAL") return requireAuthenticatedUser(req, res, next);
+  return next();
+}, async (req, res) => {
   if (hardwareAdapter.mode === "REAL") {
+    if (!isLocalRequest(req)) {
+      return res.status(403).json({
+        success: false,
+        simulated: false,
+        hardwareMode: "REAL",
+        message: "Physical camera capture is restricted to local host execution."
+      });
+    }
     const targetUrl =
       hardwareAdapter.camera.status.targetUrl ||
       hardwareAdapter.camera.getDefaultCaptureUrl();
@@ -838,7 +899,7 @@ app.get("/api/media", (req, res) => {
   }
 });
 
-app.post("/api/media/upload", (req, res) => {
+app.post("/api/media/upload", requireAuthenticatedUser, (req, res) => {
   try {
     const { name, fileData } = req.body || {};
     if (!name || !fileData) {
@@ -879,7 +940,7 @@ app.post("/api/media/upload", (req, res) => {
   }
 });
 
-app.post("/api/media/upload-chunk", (req, res) => {
+app.post("/api/media/upload-chunk", requireAuthenticatedUser, (req, res) => {
   try {
     const { name, chunk, index, total } = req.body || {};
     if (!name || chunk === undefined) {
@@ -923,7 +984,7 @@ app.post("/api/media/upload-chunk", (req, res) => {
   }
 });
 
-app.delete("/api/media/:filename", (req, res) => {
+app.delete("/api/media/:filename", requireAuthenticatedUser, (req, res) => {
   try {
     const filename = path.basename(req.params.filename);
     const targetPath = path.join(mediaDir, filename);
@@ -947,6 +1008,7 @@ app.delete("/api/media/:filename", (req, res) => {
 
 // Ping/Test ESP32-CAM Camera connection over WiFi
 const handleCamPing = async (req: express.Request, res: express.Response) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ online: false, message: "Camera diagnostics are restricted to the local host." });
   const targetUrl = req.query.url as string;
   if (!targetUrl) {
     if (!res.headersSent) return res.status(400).json({ online: false, message: "Missing target stream URL" });
@@ -975,6 +1037,7 @@ app.get("/api/rpi-ping", handleCamPing);
 
 // Proxy ESP32-CAM MJPEG camera stream to avoid browser CORS/Mixed-Content issues
 const handleCamProxy = (req: express.Request, res: express.Response) => {
+  if (!isLocalRequest(req)) return res.status(403).send("Camera proxying is restricted to the local host.");
   const targetUrl = req.query.url as string;
   if (!targetUrl) {
     if (!res.headersSent) return res.status(400).send("Missing ESP32-CAM stream URL");
@@ -1035,6 +1098,7 @@ app.get("/api/rpi-proxy", handleCamProxy);
 
 // Capture a live snapshot from ESP32-CAM stream/capture endpoint and save a validated JPEG to /public/media/
 const handleCamSnapshot = async (req: express.Request, res: express.Response) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ success: false, message: "Camera capture is restricted to the local host." });
   const { url, filename } = req.body || {};
   if (!url) {
     if (!res.headersSent) return res.status(400).json({ success: false, message: "Missing stream URL" });
@@ -1065,8 +1129,8 @@ const handleCamSnapshot = async (req: express.Request, res: express.Response) =>
   }
 };
 
-app.post("/api/esp-snapshot", handleCamSnapshot);
-app.post("/api/rpi-snapshot", handleCamSnapshot);
+app.post("/api/esp-snapshot", requireAuthenticatedUser, handleCamSnapshot);
+app.post("/api/rpi-snapshot", requireAuthenticatedUser, handleCamSnapshot);
 
 // ==========================================================
 // IMAGE-TO-3D PREVIEW (experimental, visualization-only)
@@ -1082,6 +1146,17 @@ const generate3dLimiter = rateLimit({
   legacyHeaders: false,
   validate: { xForwardedForHeader: false },
   message: { error: "Too many 3D generations from this IP. Please wait a few minutes." },
+});
+
+// Shared limiter for other billable AI endpoints; authentication runs after the
+// limiter so anonymous callers cannot bypass the request budget.
+const aiActionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
+  message: { success: false, message: "Too many AI requests. Please wait a few minutes." },
 });
 
 async function triposrCall(fn: string, data: any[], timeoutMs: number, signal?: AbortSignal): Promise<any[]> {
@@ -1124,7 +1199,7 @@ async function triposrCall(fn: string, data: any[], timeoutMs: number, signal?: 
   }
 }
 
-app.post("/api/generate-3d", generate3dLimiter, async (req, res) => {
+app.post("/api/generate-3d", generate3dLimiter, requireAuthenticatedUser, async (req, res) => {
   if (!process.env.HF_API_TOKEN) {
     return res.status(503).json({ error: "3D preview is not configured on this server." });
   }
@@ -1179,7 +1254,7 @@ app.post("/api/generate-3d", generate3dLimiter, async (req, res) => {
 });
 
 // Gemini AI Image Analysis API
-app.post("/api/analyze-image", async (req, res) => {
+app.post("/api/analyze-image", aiActionLimiter, requireAuthenticatedUser, async (req, res) => {
   const { image, missionName, inspectionArea } = req.body || {};
   const safeMissionName = xss(missionName || "MANUAL");
   const safeInspectionArea = xss(inspectionArea || "Unknown");
@@ -1347,11 +1422,11 @@ app.get("/api/detect", (req, res) => {
 });
 
 // Get AI detection list
-app.get("/api/analysis-history", async (req, res) => {
+app.get("/api/analysis-history", requireAuthenticatedUser, async (req, res) => {
   res.json(await getHistory());
 });
 
-app.post("/api/analysis-history", async (req, res) => {
+app.post("/api/analysis-history", requireAuthenticatedUser, async (req, res) => {
   try {
     const item = req.body;
     if (!item || typeof item !== "object") {
@@ -1366,7 +1441,7 @@ app.post("/api/analysis-history", async (req, res) => {
   }
 });
 
-app.delete("/api/analysis-history/:id", async (req, res) => {
+app.delete("/api/analysis-history/:id", requireAuthenticatedUser, async (req, res) => {
   const deleted = await deleteHistoryItem(req.params.id);
   if (deleted) {
     res.json({ success: true });
@@ -1375,7 +1450,7 @@ app.delete("/api/analysis-history/:id", async (req, res) => {
   }
 });
 
-app.get("/api/detections", async (req, res) => {
+app.get("/api/detections", requireAuthenticatedUser, async (req, res) => {
   const historyList = await getHistory();
   let allDetections = [];
   historyList.forEach(item => {
@@ -1388,7 +1463,7 @@ app.get("/api/detections", async (req, res) => {
 });
 
 // Get AI stats
-app.post("/api/maps-grounding", async (req, res) => {
+app.post("/api/maps-grounding", aiActionLimiter, requireAuthenticatedUser, async (req, res) => {
   try {
     const { query, latitude, longitude } = req.body || {};
     const lat = typeof latitude === "number" && !isNaN(latitude) ? latitude : 12.9082;
@@ -1453,7 +1528,7 @@ Include practical inspection advice for each site.`,
   }
 });
 
-app.get("/api/ai/statistics", async (req, res) => {
+app.get("/api/ai/statistics", requireAuthenticatedUser, async (req, res) => {
   const historyList = await getHistory();
   let allDetections = [];
   historyList.forEach(item => {
@@ -1667,8 +1742,6 @@ app.get("/video_feed", async (req, res) => {
 // ==========================================================
 // AUTHENTICATION & SECURITY
 // ==========================================================
-app.use(cookieParser());
-
 // JWT_SECRET must be set in any real deployment. We keep a dev-only fallback so
 // local runs work, but refuse to mint tokens with it in production (a known default
 // secret is forgeable). Set JWT_SECRET in the environment — see .env.example.
@@ -1826,36 +1899,21 @@ app.post("/api/auth/logout", (_req, res) => {
 
 app.get("/api/auth/status", (_req, res) => {
     const store = getAuthStore() as any;
-    const diag = typeof store.getDiagnosticStatus === "function" ? store.getDiagnosticStatus() : {};
-    const relatedEnvNames = Object.keys(process.env).filter((k) =>
-        /SUPABASE|DATABASE|POSTGRES|MC_|MISSION_CONTROL|AUTH|JWT|SESSION|SECRET/i.test(k) &&
-        !/^ANTIGRAVITY_/i.test(k)
-    );
     return res.json({
         success: true,
         backendType: store.backendType,
-        jwtConfigured: JWT_CONFIGURED,
-        ...diag,
-        configuredEnvKeys: relatedEnvNames.sort()
+        authenticationConfigured: JWT_CONFIGURED && Boolean(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.DATABASE_URL),
+        jwtConfigured: JWT_CONFIGURED
     });
 });
 
-app.get("/api/auth/audit-logs", (_req, res) => {
+app.get("/api/auth/audit-logs", requireAdmin, (_req, res) => {
     res.json({ success: true, logs: auditLogs });
 });
 
 
-// Middleware to protect API routes
-function authenticateToken(req, res, next) {
-    const token = req.cookies.token || req.headers['authorization']?.split(' ')[1];
-    if (!token) return res.status(401).json({ success: false, message: "Unauthorized" });
-
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ success: false, message: "Forbidden" });
-        req.user = user;
-        next();
-    });
-};
+// Middleware alias retained for any future route additions.
+const authenticateToken = requireAuthenticatedUser;
 
 // ==========================================================
 // VITE DEV SERVER / PRODUCTION SETUP
