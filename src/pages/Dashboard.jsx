@@ -150,6 +150,12 @@ export default function Dashboard() {
                             status={s.status}
                             error={s.error}
                             solution={s.solution}
+                            simulated={s.simulated}
+                            sensorState={s.sensorState}
+                            rawAdc={s.rawAdc}
+                            voltage={s.voltage}
+                            calibrated={s.calibrated}
+                            hardwareMode={s.hardwareMode}
                         />
                     ))}
                 </div>

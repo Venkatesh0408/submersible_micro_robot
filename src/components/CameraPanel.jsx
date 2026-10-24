@@ -1,28 +1,15 @@
 import { useEffect, useState, useRef } from "react";
 import { useMission } from "../context/MissionContext";
 import {
-  Wifi, WifiOff, Camera, Upload, Film, Play, Pause, RefreshCw,
-  Sparkles, Video, CheckCircle, ShieldAlert, Settings, HelpCircle,
-  Copy, Check, Loader2, Radio, Cpu, X
+  WifiOff, Camera, Video, CheckCircle, Loader2, X,
+  Maximize2, Minimize2, ZoomIn, Eye, Crosshair, Download
 } from "lucide-react";
 import {
-  fetchMedia, uploadMedia, pingEspCam, captureEspSnapshot,
-  getCameraConfig, getCameraStatus, updateCameraConfig
+  fetchMedia, captureEspSnapshot, getCameraStatus
 } from "../services/api";
 import "../styles/Camera.css";
 
 const STANDARD_CAM_ENVIRONMENTS = ["Water Tank", "River", "Lake", "Pipeline", "Dam", "Wastewater Plant"];
-
-// Robot camera defaults are env-configurable (VITE_ESP_DEFAULT_*), then remembered per-browser
-// in localStorage — so you point the app at the real robot's IP without editing code.
-const DEFAULT_ESP_IP = import.meta.env.VITE_ESP_DEFAULT_IP || "192.168.1.100";
-const DEFAULT_ESP_PORT = import.meta.env.VITE_ESP_DEFAULT_PORT || "81";
-const DEFAULT_ESP_PATH = import.meta.env.VITE_ESP_DEFAULT_PATH || "/stream";
-const readLS = (k, fallback) => { try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; } };
-
-const fieldLabel = { display: "flex", flexDirection: "column", gap: "5px", color: "#93a1bc", fontSize: "11px", fontWeight: 600 };
-const fieldInput = { padding: "9px 10px", borderRadius: "8px", border: "1px solid #22d3ee", background: "#16203a", color: "#fff", outline: "none", fontSize: "13px", width: "100%", boxSizing: "border-box" };
-const btnPrimary = { display: "inline-flex", alignItems: "center", gap: "7px", padding: "10px 16px", borderRadius: "10px", border: "none", background: "linear-gradient(135deg,#22d3ee,#0a6b78)", color: "#04121a", fontWeight: 700, fontSize: "13px", cursor: "pointer" };
 const btnGhost = { display: "inline-flex", alignItems: "center", gap: "7px", padding: "10px 14px", borderRadius: "10px", border: "1px solid rgba(255,255,255,.15)", background: "transparent", color: "#c7d5e6", fontWeight: 600, fontSize: "13px", cursor: "pointer" };
 
 export default function CameraPanel() {
@@ -34,186 +21,105 @@ export default function CameraPanel() {
       setIsCustomEnv(true);
     }
   }, [inspectionArea]);
-  const [online, setOnline] = useState(true);
-  const [fps, setFps] = useState(30);
-  const [resolution] = useState("VGA / SVGA (ESP32-CAM)");
-  
-  // Active video source: 'esp-wifi', 'vsty-video', or 'uploaded-video'
-  const [activeSource, setActiveSource] = useState("esp-wifi");
-  const [videoUrl, setVideoUrl] = useState("/media/underwater-bot.mp4");
-  const [uploadedVideos, setUploadedVideos] = useState([]);
-  const [uploading, setUploading] = useState(false);
-  const [statusNotice, setStatusNotice] = useState("");
-  const [isPlaying, setIsPlaying] = useState(true);
 
-  // ESP32-CAM Wireless WiFi Settings (backend is authoritative; persisted in localStorage for fallback)
-  const [espIp, setEspIp] = useState(() => readLS("espIp", DEFAULT_ESP_IP));
-  const [espPort, setEspPort] = useState(() => readLS("espPort", DEFAULT_ESP_PORT));
-  const [espPath, setEspPath] = useState(() => readLS("espPath", DEFAULT_ESP_PATH));
-  const [espUseProxy, setEspUseProxy] = useState(() => readLS("espUseProxy", "true") === "true"); // Recommended: avoids CORS / HTTPS issues
-  const [espConnected, setEspConnected] = useState(false);
-  const [espConnecting, setEspConnecting] = useState(false);
-  const [espLatency, setEspLatency] = useState(null);
-  const [espMessage, setEspMessage] = useState("");
-  const [showEspSetupGuide, setShowEspSetupGuide] = useState(false);
-  const [copiedCode, setCopiedCode] = useState(false);
-  const [capturingSnapshot, setCapturingSnapshot] = useState(false);
-  const [espNoticeDismissed, setEspNoticeDismissed] = useState(false);
-
-  // Fetch authoritative camera configuration & auto-connect status from backend on mount
+  // Clean up legacy localStorage keys from prior manual IP configuration
   useEffect(() => {
-    let isMounted = true;
-    const initCamera = async () => {
-      try {
-        const res = await getCameraConfig();
-        if (res?.success && res.config && isMounted) {
-          const cfg = res.config;
-          if (cfg.ip) {
-            setEspIp(cfg.ip);
-            try { localStorage.setItem("espIp", cfg.ip); } catch {}
-          }
-          if (cfg.streamPort) {
-            setEspPort(String(cfg.streamPort));
-            try { localStorage.setItem("espPort", String(cfg.streamPort)); } catch {}
-          }
-          if (cfg.streamPath) {
-            setEspPath(cfg.streamPath);
-            try { localStorage.setItem("espPath", cfg.streamPath); } catch {}
-          }
-          // Query backend camera status
-          const statusRes = await getCameraStatus(false);
-          if (isMounted) {
-            if (statusRes?.status?.online) {
-              setEspConnected(true);
-              setEspLatency(statusRes.status.latencyMs ?? null);
-              setEspMessage(`Connected to ESP32-CAM — stream active${statusRes.status.latencyMs ? ` (${statusRes.status.latencyMs}ms)` : ""}`);
-              setActiveSource("esp-wifi");
-            } else if (cfg.autoConnect && !cfg.isCloudEnvironment) {
-              const targetUrl = cfg.streamUrl || `http://${cfg.ip}:${cfg.streamPort}${cfg.streamPath}`;
-              const pingResult = await pingEspCam(targetUrl);
-              if (isMounted && pingResult?.online) {
-                setEspConnected(true);
-                setEspLatency(pingResult.latencyMs ?? null);
-                setEspMessage(`Connected — live stream reachable (${pingResult.latencyMs}ms).`);
-                setActiveSource("esp-wifi");
-              } else if (isMounted) {
-                setEspConnected(false);
-                setEspMessage(statusRes?.status?.message || "ESP32-CAM is offline or standby.");
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("Failed to load backend camera config:", err);
-      }
-    };
-    initCamera();
-    return () => { isMounted = false; };
+    try {
+      localStorage.removeItem("espIp");
+      localStorage.removeItem("espPort");
+      localStorage.removeItem("espPath");
+      localStorage.removeItem("espUseProxy");
+    } catch {}
   }, []);
 
-  // Re-show the offline notice whenever the connection state flips.
+  const [fps] = useState(30);
+  const [resolution] = useState("VGA / SVGA");
+
+  // Camera connection state managed authoritatively by backend
+  const [espConnected, setEspConnected] = useState(false);
+  const [espLatency, setEspLatency] = useState(null);
+  const [capturingSnapshot, setCapturingSnapshot] = useState(false);
+  const [statusNotice, setStatusNotice] = useState("");
+  const [espNoticeDismissed, setEspNoticeDismissed] = useState(false);
+
+  // Interactive Viewport HUD States
+  const [zoomLevel, setZoomLevel] = useState(1); // 1x, 1.5x, 2x
+  const [showReticle, setShowReticle] = useState(true);
+  const [marineFilter, setMarineFilter] = useState(false);
+  const [flashActive, setFlashActive] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [recentSnapshots, setRecentSnapshots] = useState([]);
+  const [lightboxImg, setLightboxImg] = useState(null);
+  const [radarTarget, setRadarTarget] = useState(null);
+
+  const canvasRef = useRef(null);
+  const viewportRef = useRef(null);
+
+  // Authoritative same-origin stream endpoint provided by backend
+  const streamUrl = "/api/camera/stream";
+
+  // Background camera status sync with backend
+  useEffect(() => {
+    let isMounted = true;
+    const syncStatus = async () => {
+      try {
+        const res = await getCameraStatus(true);
+        if (isMounted && res?.status) {
+          setEspConnected(Boolean(res.status.online));
+          setEspLatency(res.status.latencyMs ?? null);
+        }
+      } catch (err) {
+        if (isMounted) {
+          setEspConnected(false);
+          setEspLatency(null);
+        }
+      }
+    };
+
+    // Initial check
+    syncStatus();
+
+    // Auto-poll camera status every 5 seconds so live feed automatically connects when powered
+    const timer = setInterval(syncStatus, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  // Re-show the offline notice whenever connection state flips
   useEffect(() => { setEspNoticeDismissed(false); }, [espConnected]);
 
-  // Remember the camera connection settings across reloads.
-  useEffect(() => { try { localStorage.setItem("espIp", espIp); } catch { /* ignore */ } }, [espIp]);
-  useEffect(() => { try { localStorage.setItem("espPort", espPort); } catch { /* ignore */ } }, [espPort]);
-  useEffect(() => { try { localStorage.setItem("espPath", espPath); } catch { /* ignore */ } }, [espPath]);
-  useEffect(() => { try { localStorage.setItem("espUseProxy", String(espUseProxy)); } catch { /* ignore */ } }, [espUseProxy]);
-
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const fileInputRef = useRef(null);
-
-  // Compute full target ESP32-CAM Stream URL
-  const rawEspUrl = `http://${espIp.trim()}:${espPort.trim()}${espPath.trim().startsWith("/") ? espPath.trim() : "/" + espPath.trim()}`;
-  const activeEspStreamUrl = espUseProxy 
-    ? `/api/camera/stream?url=${encodeURIComponent(rawEspUrl)}`
-    : rawEspUrl;
-
-  // Load saved video files from backend storage
-  const loadSavedVideos = async () => {
+  // Load saved snapshots & media from backend
+  const loadRecentMedia = async () => {
     try {
       const files = await fetchMedia();
       if (Array.isArray(files)) {
-        const videos = files.filter(f => f.type === "video" || f.filename?.endsWith('.mp4') || f.filename?.endsWith('.webm') || f.url?.endsWith('.mp4'));
-        setUploadedVideos(videos);
-        if (videos.length > 0 && activeSource === "uploaded-video") {
-          setVideoUrl(videos[0].url);
-        }
+        const snaps = files.filter(f => f.type === "image" || f.filename?.endsWith('.jpg') || f.filename?.endsWith('.png') || f.url?.endsWith('.jpg'));
+        setRecentSnapshots(snaps.slice(0, 5));
       }
     } catch (err) {
-      console.error("Failed to fetch videos:", err);
+      console.warn("Failed to fetch media:", err);
     }
   };
 
   useEffect(() => {
-    loadSavedVideos();
+    loadRecentMedia();
   }, []);
 
-  // Connect & Ping ESP32-CAM Camera over WiFi — a REAL reachability test via the backend.
-  const handleConnectEsp = async () => {
-    const ip = espIp.trim();
-    if (!ip) {
-      setEspMessage("Enter your ESP32-CAM IP address (e.g. 192.168.1.100) — it prints in the Arduino Serial Monitor.");
-      return;
-    }
-
-    setEspConnecting(true);
-    setEspConnected(false);
-    setEspLatency(null);
-    setEspMessage(`Checking ${rawEspUrl} …`);
-
-    try {
-      // Sync update to authoritative backend configuration
-      await updateCameraConfig({
-        ip,
-        streamPort: parseInt(espPort.trim(), 10) || 81,
-        streamPath: espPath.trim(),
-        isVerified: true
-      });
-
-      const pingResult = await pingEspCam(rawEspUrl);
-      if (pingResult?.online) {
-        setEspConnected(true);
-        setEspLatency(pingResult.latencyMs ?? null);
-        setEspMessage(`Connected — live stream reachable${pingResult.latencyMs != null ? ` (${pingResult.latencyMs} ms)` : ""}.`);
-        setActiveSource("esp-wifi");
-      } else {
-        // Honest failure: do NOT fake a connection. Give an actionable checklist.
-        setEspConnected(false);
-        setEspLatency(null);
-        setEspMessage(
-          `Not reachable at ${rawEspUrl}. ${pingResult?.message || ""} Check: (1) ESP32-CAM is powered on, ` +
-          `(2) this device is on the SAME WiFi as the robot, (3) the IP matches the Serial Monitor, ` +
-          `(4) if the site is on https, run the app locally on the robot's LAN.`
-        );
-      }
-    } catch (err) {
-      console.error("ESP Ping Error:", err);
-      setEspConnected(false);
-      setEspLatency(null);
-      setEspMessage("Connection check failed. Make sure the backend is running on the same WiFi as the robot, then retry.");
-    } finally {
-      setEspConnecting(false);
-    }
-  };
-
-  const handleDisconnectEsp = () => {
-    setEspConnected(false);
-    setEspLatency(null);
-    setEspMessage("Disconnected from ESP32-CAM.");
-  };
-
-  // Capture Live Snapshot from ESP32-CAM Camera & Save to Backend Storage
+  // Interactive Live Snapshot Capture with Shutter Flash
   const handleCaptureSnapshot = async () => {
     setCapturingSnapshot(true);
+    setFlashActive(true);
+    setTimeout(() => setFlashActive(false), 450);
     setStatusNotice("Capturing live frame snapshot from ESP32-CAM...");
 
     try {
       const filename = `esp-snapshot-${Date.now()}.jpg`;
-      const result = await captureEspSnapshot(rawEspUrl, filename);
+      const result = await captureEspSnapshot(filename);
       if (result?.success) {
         setStatusNotice(`Snapshot captured and saved as ${result.file?.filename || filename}!`);
+        loadRecentMedia();
         setTimeout(() => setStatusNotice(""), 4000);
       } else {
         setStatusNotice(result?.message || "Failed to save ESP32 snapshot.");
@@ -221,16 +127,31 @@ export default function CameraPanel() {
       }
     } catch (err) {
       console.error("Snapshot Capture Error:", err);
-      setStatusNotice("Snapshot captured locally.");
+      setStatusNotice("Snapshot capture error: " + (err?.message || "network error"));
       setTimeout(() => setStatusNotice(""), 3000);
     } finally {
       setCapturingSnapshot(false);
     }
   };
 
-  // Canvas Fallback Renderer for Simulated Underwater View when ESP is offline
+  // Cycle digital zoom
+  const cycleZoom = () => {
+    setZoomLevel((prev) => (prev === 1 ? 1.5 : prev === 1.5 ? 2 : 1));
+  };
+
+  // Fullscreen toggle
+  const toggleFullscreen = () => {
+    if (!viewportRef.current) return;
+    if (!document.fullscreenElement) {
+      viewportRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  };
+
+  // Interactive Canvas Radar Fallback with Target Tracking
   useEffect(() => {
-    if (espConnected || activeSource !== "esp-wifi") return;
+    if (espConnected) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -243,8 +164,11 @@ export default function CameraPanel() {
       ctx.fillStyle = "#030b12";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Grid lines
-      ctx.strokeStyle = "rgba(18,211,224, 0.15)";
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+
+      // Coordinate Grid Lines
+      ctx.strokeStyle = "rgba(18,211,224, 0.12)";
       ctx.lineWidth = 1;
       for (let x = 0; x < canvas.width; x += 40) {
         ctx.beginPath();
@@ -259,52 +183,76 @@ export default function CameraPanel() {
         ctx.stroke();
       }
 
-      // Scanning radar pulse
-      angle += 0.03;
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
+      // Concentric Range Rings (25m, 50m, 75m, 100m scale)
+      const rings = [60, 120, 180, 240];
+      rings.forEach((r, idx) => {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(18,211,224, 0.22)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
 
+        ctx.fillStyle = "rgba(18,211,224, 0.5)";
+        ctx.font = "10px monospace";
+        ctx.fillText(`${(idx + 1) * 25}m`, cx + r + 4, cy - 4);
+      });
+
+      // Rotating Sonar Sweep Beam
+      angle += 0.025;
       ctx.save();
       ctx.translate(cx, cy);
 
-      ctx.beginPath();
-      ctx.arc(0, 0, 140, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(18,211,224, 0.4)";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const gradient = ctx.createRadialGradient(0, 0, 10, 0, 0, 260);
+      gradient.addColorStop(0, "rgba(34, 211, 238, 0.35)");
+      gradient.addColorStop(1, "rgba(34, 211, 238, 0)");
 
-      ctx.beginPath();
-      ctx.arc(0, 0, 80, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(18,211,224, 0.25)";
-      ctx.stroke();
-
-      // Sweeping line
       ctx.beginPath();
       ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(angle) * 140, Math.sin(angle) * 140);
+      ctx.arc(0, 0, 250, angle - 0.25, angle);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Sharp sweep leading line
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(angle) * 250, Math.sin(angle) * 250);
       ctx.strokeStyle = "#22d3ee";
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // Simulated robot central indicator
+      // Central Robot Indicator
       ctx.beginPath();
-      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.arc(0, 0, 7, 0, Math.PI * 2);
       ctx.fillStyle = "#22d3ee";
       ctx.shadowColor = "#22d3ee";
-      ctx.shadowBlur = 20;
+      ctx.shadowBlur = 15;
       ctx.fill();
 
-      // Product text logo
-      ctx.font = "900 32px 'Orbitron', 'Arial Black', sans-serif";
+      // Brand Title
+      ctx.font = "900 28px 'Orbitron', monospace";
       ctx.fillStyle = "#ffffff";
       ctx.textAlign = "center";
-      ctx.shadowColor = "#22d3ee";
-      ctx.shadowBlur = 15;
-      ctx.fillText("SUBMERSIBLE", 0, 75);
+      ctx.fillText("PROJECT AQUA", 0, 130);
 
       ctx.restore();
 
-      // HUD Overlay details — canvas fallback clearly identified as simulation
+      // Interactive Cursor Target Tracking
+      if (radarTarget) {
+        ctx.save();
+        ctx.strokeStyle = "#ffb703";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(radarTarget.x, radarTarget.y, 16, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffb703";
+        ctx.font = "bold 11px monospace";
+        ctx.fillText(`TARGET: R=${radarTarget.range}m | BRG=${radarTarget.bearing}°`, radarTarget.x + 22, radarTarget.y + 4);
+        ctx.restore();
+      }
+
+      // Simulation Badge
       ctx.fillStyle = "#22d3ee";
       ctx.font = "bold 12px monospace";
       ctx.fillText("● [SIMULATION] RADAR STANDBY - CAMERA OFFLINE", 20, 30);
@@ -313,71 +261,29 @@ export default function CameraPanel() {
     };
 
     render();
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [espConnected, radarTarget]);
 
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-    };
-  }, [espConnected, activeSource]);
+  // Handle mouse interaction on radar canvas
+  const handleCanvasMouseMove = (e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
 
-  const espArduinoSketch = `// ESP32-CAM Camera Server (Arduino IDE)
-// Arduino Nano serves as Main Controller for Motors & Sensors
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const dx = x - cx;
+    const dy = y - cy;
+    const distPx = Math.sqrt(dx * dx + dy * dy);
+    const rangeM = (distPx / 2.5).toFixed(1);
+    let bearingDeg = Math.round((Math.atan2(dy, dx) * 180) / Math.PI + 90);
+    if (bearingDeg < 0) bearingDeg += 360;
 
-#include "esp_camera.h"
-#include <WiFi.h>
-#include "esp_http_server.h"
-
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
-#define CAMERA_MODEL_AI_THINKER
-#include "camera_pins.h"
-
-void startCameraServer();
-
-void setup() {
-  Serial.begin(115200); // UART link to Arduino Nano main controller
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(500); }
-
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA; // VGA or SVGA
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
-
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) return;
-
-  startCameraServer(); // Starts MJPEG stream server on port 81 (/stream)
-  Serial.print("ESP32-CAM Stream Ready at http://");
-  Serial.println(WiFi.localIP());
-}
-
-void loop() { delay(1000); }`;
-
-  const copyScriptToClipboard = () => {
-    navigator.clipboard.writeText(espArduinoSketch);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 3000);
+    setRadarTarget({ x, y, range: rangeM, bearing: bearingDeg });
   };
 
   return (
@@ -408,11 +314,11 @@ void loop() { delay(1000); }`;
             fontSize: '12px',
             boxShadow: espConnected ? '0 0 15px rgba(34,197,94,.4)' : '0 0 15px rgba(18,211,224,.4)'
           }}>
-            {espConnected ? "LIVE ESP32" : espConnecting ? "CHECKING…" : "STANDBY"}
+            {espConnected ? "LIVE ESP32-CAM" : "STANDBY RADAR"}
           </span>
         </div>
 
-        {/* Inputs row matching MapPanel */}
+        {/* Inputs row */}
         <div style={{ display: 'flex', gap: '12px', width: '100%', paddingBottom: '4px', flexWrap: 'wrap' }}>
           <input 
             type="text" 
@@ -461,27 +367,48 @@ void loop() { delay(1000); }`;
         </div>
       </div>
 
-      {/* Main Video Viewport */}
-      <div style={{
-        position: "relative",
-        width: "100%",
-        height: "420px",
-        background: "#000000",
-        borderRadius: "16px",
-        overflow: "hidden",
-        border: "2px solid rgba(18,211,224, 0.4)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center"
-      }}>
-        {espConnected ? (
-          <div style={{ width: "100%", height: "100%", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", background: "#050103" }}>
+      {/* Main Interactive Video Viewport */}
+      <div
+        ref={viewportRef}
+        style={{
+          position: "relative",
+          width: "100%",
+          height: "440px",
+          background: "#000000",
+          borderRadius: "16px",
+          overflow: "hidden",
+          border: "2px solid rgba(18,211,224, 0.4)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          boxShadow: "inset 0 0 30px rgba(0,0,0,0.8)"
+        }}
+      >
+        {/* Shutter flash animation on capture */}
+        {flashActive && <div className="camera-flash-overlay" />}
+
+        {/* Video / Canvas Layer with smooth digital zoom scaling */}
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            position: "relative",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transform: `scale(${zoomLevel})`,
+            transition: "transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+            transformOrigin: "center center"
+          }}
+          className={marineFilter ? "marine-vision-filter" : ""}
+        >
+          {espConnected ? (
             <img
-              src={activeEspStreamUrl}
-              alt="ESP32-CAM WiFi Live Camera Stream"
+              src={streamUrl}
+              alt="ESP32-CAM Live Camera Stream"
               onError={() => {
                 setEspConnected(false);
-                setEspMessage(`Stream error: Cannot load feed from ${rawEspUrl}. Ensure camera sketch is running on ESP32-CAM.`);
+                setEspLatency(null);
               }}
               style={{
                 width: "100%",
@@ -490,83 +417,145 @@ void loop() { delay(1000); }`;
                 filter: missionPaused ? "grayscale(100%) blur(2px)" : "none"
               }}
             />
-          </div>
-        ) : (
-          <div style={{ width: "100%", height: "100%", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", background: "#050103" }}>
-            {/* Automatic canvas video stream when ESP is not connected */}
+          ) : (
             <canvas
               ref={canvasRef}
               width={1280}
               height={720}
+              onMouseMove={handleCanvasMouseMove}
+              onMouseLeave={() => setRadarTarget(null)}
               style={{
                 width: "100%",
                 height: "100%",
                 objectFit: "cover",
-                filter: missionPaused ? "grayscale(100%) blur(2px)" : "none"
+                filter: missionPaused ? "grayscale(100%) blur(2px)" : "none",
+                cursor: "crosshair"
               }}
             />
+          )}
+        </div>
+
+        {/* Tactical Reticle & Corner Brackets Overlay */}
+        {showReticle && (
+          <div className="hud-reticle-overlay">
+            <div className="hud-corner hud-corner-tl" />
+            <div className="hud-corner hud-corner-tr" />
+            <div className="hud-corner hud-corner-bl" />
+            <div className="hud-corner hud-corner-br" />
+            <div className="hud-crosshair-center">
+              <div className="hud-reticle-circle" />
+            </div>
           </div>
         )}
 
-        {/* Live HUD Banner Overlay */}
+        {/* Live HUD Status Badge (Top-Left) */}
         <div style={{
           position: "absolute",
           top: "12px",
           left: "12px",
-          background: "rgba(14, 21, 36, 0.85)",
+          background: "rgba(14, 21, 36, 0.88)",
           border: "1px solid rgba(18,211,224, 0.5)",
           borderRadius: "8px",
           padding: "6px 12px",
           display: "flex",
           alignItems: "center",
           gap: "8px",
-          backdropFilter: "blur(4px)",
-          zIndex: 10
+          backdropFilter: "blur(6px)",
+          zIndex: 20
         }}>
           <span style={{
             width: "10px",
             height: "10px",
             borderRadius: "50%",
-            background: missionPaused ? "#eab308" : activeSource === "esp-wifi" && espConnected ? "#22c55e" : "#22d3ee",
-            boxShadow: activeSource === "esp-wifi" && espConnected ? "0 0 10px #22c55e" : "0 0 10px #22d3ee"
+            background: missionPaused ? "#eab308" : espConnected ? "#22c55e" : "#22d3ee",
+            boxShadow: espConnected ? "0 0 10px #22c55e" : "0 0 10px #22d3ee"
           }} />
           <span style={{ color: "#ffffff", fontSize: "12px", fontWeight: "bold" }}>
-            {missionPaused ? "MISSION PAUSED" : activeSource === "esp-wifi" ? "ESP32-CAM WIRELESS STREAM" : "LIVE FEED ACTIVE"}
+            {missionPaused ? "MISSION PAUSED" : espConnected ? "LIVE ESP32-CAM" : "RADAR SIMULATION ACTIVE"}
           </span>
         </div>
 
-        {/* ESP32-CAM Not Connected Notification Banner (dismissible) */}
+        {/* Interactive Telemetry Ribbon (Bottom-Left) */}
+        <div className="viewport-telemetry-ribbon">
+          <span>FPS: <b>{fps}</b></span>
+          <span>LATENCY: <b>{espLatency !== null ? `${espLatency}ms` : "LOW"}</b></span>
+          <span>ZOOM: <b>{zoomLevel}x</b></span>
+          <span>RES: <b>{resolution}</b></span>
+        </div>
+
+        {/* Interactive Action Toolbar (Bottom-Right HUD) */}
+        <div className="viewport-control-bar">
+          <button
+            className={`hud-control-btn ${zoomLevel > 1 ? "active" : ""}`}
+            onClick={cycleZoom}
+            title="Cycle Digital Zoom (1x, 1.5x, 2x)"
+          >
+            <ZoomIn size={13} /> {zoomLevel}x
+          </button>
+          <button
+            className={`hud-control-btn ${showReticle ? "active" : ""}`}
+            onClick={() => setShowReticle(!showReticle)}
+            title="Toggle Tactical Reticle Overlay"
+          >
+            <Crosshair size={13} /> Reticle
+          </button>
+          <button
+            className={`hud-control-btn ${marineFilter ? "active" : ""}`}
+            onClick={() => setMarineFilter(!marineFilter)}
+            title="Toggle Marine Night Vision Filter"
+          >
+            <Eye size={13} /> Marine Vision
+          </button>
+          <button
+            className="hud-control-btn"
+            onClick={handleCaptureSnapshot}
+            disabled={capturingSnapshot}
+            title="Capture Instant Still Frame"
+            style={{ color: "#22d3ee", borderColor: "#22d3ee" }}
+          >
+            {capturingSnapshot ? <Loader2 size={13} className="animate-spin" /> : <Camera size={13} />} Snap
+          </button>
+          <button
+            className="hud-control-btn"
+            onClick={toggleFullscreen}
+            title="Toggle Fullscreen Mode"
+          >
+            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+          </button>
+        </div>
+
+        {/* Dismissible Offline Banner */}
         {!espConnected && !espNoticeDismissed && (
           <div style={{
             position: "absolute",
             top: "12px",
             right: "12px",
             maxWidth: "calc(100% - 24px)",
-            background: "rgba(13,26,40, 0.92)",
+            background: "rgba(13,26,40, 0.94)",
             border: "1px solid #22d3ee",
             borderRadius: "8px",
-            padding: "8px 10px 8px 14px",
+            padding: "8px 12px",
             display: "flex",
             alignItems: "center",
             gap: "10px",
-            backdropFilter: "blur(6px)",
+            backdropFilter: "blur(8px)",
             boxShadow: "0 0 15px rgba(18,211,224, 0.4)",
-            zIndex: 12
+            zIndex: 25
           }}>
             <WifiOff size={16} style={{ color: "#22d3ee", flexShrink: 0 }} className="animate-pulse" />
             <div style={{ minWidth: 0 }}>
               <div style={{ color: "#ffffff", fontSize: "12px", fontWeight: "bold" }}>
-                ESP32-CAM NOT CONNECTED
+                CAMERA OFFLINE — RETRYING CONNECTION
               </div>
               <div style={{ color: "#8296a8", fontSize: "10px", marginTop: "1px" }}>
-                Main MCU: Arduino Nano Active | Video feed standby
+                Hover cursor over radar for coordinate targeting | Live feed starts automatically when camera is powered
               </div>
             </div>
             <button
               onClick={() => setEspNoticeDismissed(true)}
               aria-label="Dismiss"
               title="Dismiss"
-              style={{ background: "transparent", color: "#8296a8", padding: 2, flexShrink: 0, display: "grid", placeItems: "center", cursor: "pointer" }}
+              style={{ background: "transparent", color: "#8296a8", padding: 2, flexShrink: 0, display: "grid", placeItems: "center", cursor: "pointer", border: "none" }}
             >
               <X size={14} />
             </button>
@@ -574,87 +563,77 @@ void loop() { delay(1000); }`;
         )}
       </div>
 
-      {/* ===== Camera Connection (ESP32-CAM over WiFi) — configurable + real reachability ===== */}
-      <div style={{ background: "#0b1424", border: "1px solid rgba(18,211,224,.25)", borderRadius: "14px", padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0, color: "#fff", fontSize: "15px", fontWeight: 700, display: "flex", alignItems: "center", gap: "8px" }}>
-            <Radio size={17} style={{ color: "#22d3ee" }} /> Camera Connection
-          </h3>
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: "6px",
-            padding: "5px 11px", borderRadius: "999px", fontSize: "12px", fontWeight: 700,
-            color: espConnected ? "#052e16" : "#fff",
-            background: espConnected ? "#22c55e" : espConnecting ? "#eab308" : "#334155",
-          }}>
-            {espConnected ? <Wifi size={13} /> : <WifiOff size={13} />}
-            {espConnected ? `Connected${espLatency != null ? ` · ${espLatency} ms` : ""}` : espConnecting ? "Checking…" : "Disconnected"}
-          </span>
+      {/* Status Notice Toast / Banner */}
+      {statusNotice && (
+        <div style={{
+          fontSize: "12px",
+          color: "#22d3ee",
+          background: "rgba(34,211,238,0.12)",
+          border: "1px solid rgba(34,211,238,0.3)",
+          borderRadius: "8px",
+          padding: "8px 12px",
+          display: "flex",
+          alignItems: "center",
+          gap: "8px"
+        }}>
+          <CheckCircle size={14} /> {statusNotice}
         </div>
+      )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1.4fr", gap: "10px" }}>
-          <label style={fieldLabel}>Robot IP
-            <input value={espIp} onChange={(e) => setEspIp(e.target.value)} placeholder="192.168.1.100" style={fieldInput} inputMode="decimal" />
-          </label>
-          <label style={fieldLabel}>Port
-            <input value={espPort} onChange={(e) => setEspPort(e.target.value)} placeholder="81" style={fieldInput} inputMode="numeric" />
-          </label>
-          <label style={fieldLabel}>Path
-            <input value={espPath} onChange={(e) => setEspPath(e.target.value)} placeholder="/stream" style={fieldInput} />
-          </label>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "#93a1bc", fontSize: "12px", cursor: "pointer" }}>
-            <input type="checkbox" checked={espUseProxy} onChange={(e) => setEspUseProxy(e.target.checked)} />
-            Route through backend proxy (recommended — avoids CORS &amp; https blocking)
-          </label>
-          <code style={{ fontSize: "11px", color: "#5f7793", fontFamily: "monospace", wordBreak: "break-all" }}>{rawEspUrl}</code>
-        </div>
-
-        <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          {!espConnected ? (
-            <button onClick={handleConnectEsp} disabled={espConnecting} style={{ ...btnPrimary, opacity: espConnecting ? 0.7 : 1, cursor: espConnecting ? "wait" : "pointer" }}>
-              {espConnecting ? <Loader2 size={15} className="animate-spin" /> : <Wifi size={15} />}
-              {espConnecting ? "Checking…" : "Connect Camera"}
-            </button>
-          ) : (
-            <>
-              <button onClick={handleCaptureSnapshot} disabled={capturingSnapshot} style={{ ...btnPrimary, opacity: capturingSnapshot ? 0.7 : 1 }}>
-                {capturingSnapshot ? <Loader2 size={15} className="animate-spin" /> : <Camera size={15} />}
-                {capturingSnapshot ? "Capturing…" : "Capture Snapshot"}
-              </button>
-              <button onClick={handleDisconnectEsp} style={btnGhost}>
-                <WifiOff size={15} /> Disconnect
-              </button>
-            </>
-          )}
-          <button onClick={() => setShowEspSetupGuide((v) => !v)} style={btnGhost}>
-            <HelpCircle size={15} /> {showEspSetupGuide ? "Hide setup" : "Setup guide"}
-          </button>
-        </div>
-
-        {espMessage && (
-          <div style={{ fontSize: "12px", lineHeight: 1.5, color: espConnected ? "#4ade80" : "#c7d5e6", background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.06)", borderRadius: "8px", padding: "8px 11px" }}>
-            {espMessage}
+      {/* Recent Captures Interactive Strip */}
+      {recentSnapshots.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "12px", color: "#93a1bc", fontWeight: 600 }}>
+            <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <Camera size={13} style={{ color: "#22d3ee" }} /> Recent Mission Captures
+            </span>
+            <span style={{ fontSize: "11px", color: "#5f7793" }}>Click to expand in lightbox</span>
           </div>
-        )}
+          <div className="snapshot-strip">
+            {recentSnapshots.map((item, idx) => (
+              <div
+                key={item.id || idx}
+                className="snapshot-thumb-card"
+                onClick={() => setLightboxImg(item.url)}
+                title={`Captured: ${item.name || item.filename}`}
+              >
+                <img src={item.url} alt={item.name || "Snapshot"} className="snapshot-thumb-img" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-        {showEspSetupGuide && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
-              <span style={{ color: "#93a1bc", fontSize: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
-                <Cpu size={14} /> Flash this to the ESP32-CAM, then read its IP from the Serial Monitor.
+      {/* Lightbox Modal for Snapshot Inspection */}
+      {lightboxImg && (
+        <div className="camera-lightbox-modal" onClick={() => setLightboxImg(null)}>
+          <div className="camera-lightbox-content" onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#16203a", borderBottom: "1px solid rgba(34,211,238,0.3)" }}>
+              <span style={{ color: "#ffffff", fontWeight: 700, fontSize: "14px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <Camera size={15} style={{ color: "#22d3ee" }} /> Mission Snapshot View
               </span>
-              <button onClick={copyScriptToClipboard} style={{ ...btnGhost, padding: "6px 10px" }}>
-                {copiedCode ? <Check size={14} /> : <Copy size={14} />} {copiedCode ? "Copied" : "Copy"}
-              </button>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <a
+                  href={lightboxImg}
+                  download="subsea-snapshot.jpg"
+                  style={{ ...btnGhost, padding: "5px 10px", textDecoration: "none", fontSize: "12px" }}
+                >
+                  <Download size={13} /> Save
+                </a>
+                <button
+                  onClick={() => setLightboxImg(null)}
+                  style={{ background: "transparent", border: "none", color: "#93a1bc", cursor: "pointer" }}
+                >
+                  <X size={18} />
+                </button>
+              </div>
             </div>
-            <pre style={{ margin: 0, maxHeight: "220px", overflow: "auto", background: "#05090f", border: "1px solid rgba(255,255,255,.06)", borderRadius: "8px", padding: "12px", fontSize: "11px", lineHeight: 1.5, color: "#a7c0d8" }}>
-              {espArduinoSketch}
-            </pre>
+            <div style={{ padding: "16px", background: "#030712", display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "70vh", overflow: "hidden" }}>
+              <img src={lightboxImg} alt="Preview" style={{ maxWidth: "100%", maxHeight: "68vh", objectFit: "contain", borderRadius: "8px" }} />
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

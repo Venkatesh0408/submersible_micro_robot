@@ -1,0 +1,246 @@
+/* ==========================================================
+   VSTY SUBMERSIBLE MICRO ROBOT — MISSION CAMERA & HUD STYLES
+   ========================================================== */
+
+/* Shutter flash animation on snapshot */
+@keyframes cameraFlash {
+  0% { opacity: 0.95; }
+  50% { opacity: 0.5; }
+  100% { opacity: 0; }
+}
+
+.camera-flash-overlay {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, rgba(255,255,255,0.95) 0%, rgba(34,211,238,0.4) 100%);
+  pointer-events: none;
+  z-index: 50;
+  animation: cameraFlash 0.4s ease-out forwards;
+}
+
+/* Tactical reticle / crosshair overlay */
+.hud-reticle-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hud-crosshair-center {
+  position: relative;
+  width: 60px;
+  height: 60px;
+}
+
+.hud-crosshair-center::before,
+.hud-crosshair-center::after {
+  content: "";
+  position: absolute;
+  background: rgba(34, 211, 238, 0.6);
+  box-shadow: 0 0 6px rgba(34, 211, 238, 0.8);
+}
+
+.hud-crosshair-center::before {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.hud-crosshair-center::after {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+}
+
+.hud-reticle-circle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  border: 1px dashed rgba(34, 211, 238, 0.7);
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
+}
+
+/* Tactical Corner Brackets */
+.hud-corner {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-color: rgba(34, 211, 238, 0.7);
+  pointer-events: none;
+}
+
+.hud-corner-tl {
+  top: 24px;
+  left: 24px;
+  border-top: 2px solid;
+  border-left: 2px solid;
+}
+
+.hud-corner-tr {
+  top: 24px;
+  right: 24px;
+  border-top: 2px solid;
+  border-right: 2px solid;
+}
+
+.hud-corner-bl {
+  bottom: 24px;
+  left: 24px;
+  border-bottom: 2px solid;
+  border-left: 2px solid;
+}
+
+.hud-corner-br {
+  bottom: 24px;
+  right: 24px;
+  border-bottom: 2px solid;
+  border-right: 2px solid;
+}
+
+/* Underwater / Marine Night-Vision Shader Filter */
+.marine-vision-filter {
+  filter: contrast(1.25) brightness(1.1) hue-rotate(95deg) saturate(1.7) !important;
+}
+
+/* Interactive Viewport Action Toolbar */
+.viewport-control-bar {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(11, 20, 36, 0.85);
+  backdrop-filter: blur(8px);
+  padding: 6px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+}
+
+.hud-control-btn {
+  background: rgba(22, 32, 58, 0.8);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  color: #c7d5e6;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.2s ease;
+}
+
+.hud-control-btn:hover {
+  background: rgba(34, 211, 238, 0.2);
+  color: #22d3ee;
+  border-color: #22d3ee;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.3);
+  transform: translateY(-1px);
+}
+
+.hud-control-btn.active {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.3), rgba(10, 107, 120, 0.5));
+  color: #22d3ee;
+  border-color: #22d3ee;
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.4);
+}
+
+/* Telemetry Ribbon at bottom of viewport */
+.viewport-telemetry-ribbon {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(11, 20, 36, 0.85);
+  backdrop-filter: blur(8px);
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  font-family: monospace;
+  font-size: 11px;
+  color: #93a1bc;
+  z-index: 20;
+}
+
+.viewport-telemetry-ribbon span b {
+  color: #22d3ee;
+}
+
+/* Recent Snapshots Strip */
+.snapshot-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 8px 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(34, 211, 238, 0.3) transparent;
+}
+
+.snapshot-thumb-card {
+  position: relative;
+  flex-shrink: 0;
+  width: 90px;
+  height: 60px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: #05090f;
+}
+
+.snapshot-thumb-card:hover {
+  border-color: #22d3ee;
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.5);
+  transform: scale(1.05);
+}
+
+.snapshot-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Lightbox Modal */
+.camera-lightbox-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 9, 18, 0.88);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 24px;
+}
+
+.camera-lightbox-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 85vh;
+  background: #0e1524;
+  border: 1px solid #22d3ee;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 0 40px rgba(34, 211, 238, 0.3);
+  display: flex;
+  flex-direction: column;
+}

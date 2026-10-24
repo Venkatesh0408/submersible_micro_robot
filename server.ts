@@ -973,9 +973,10 @@ const handleCamPing = async (req: express.Request, res: express.Response) => {
 app.get("/api/esp-ping", handleCamPing);
 app.get("/api/rpi-ping", handleCamPing);
 
-// Proxy ESP32-CAM MJPEG camera stream to avoid browser CORS/Mixed-Content issues
+// Proxy ESP32-CAM MJPEG camera stream to avoid browser CORS/Mixed-Content issues.
+// Exclusively targets the backend-configured stream target to prevent arbitrary proxying.
 const handleCamProxy = (req: express.Request, res: express.Response) => {
-  const targetUrl = (req.query.url as string) || hardwareAdapter.camera.getDefaultStreamUrl();
+  const targetUrl = hardwareAdapter.camera.getDefaultStreamUrl();
   hardwareAdapter.camera.proxyStream(targetUrl, req, res);
 };
 
@@ -983,10 +984,11 @@ app.get("/api/esp-proxy", handleCamProxy);
 app.get("/api/rpi-proxy", handleCamProxy);
 app.get("/api/camera/stream", handleCamProxy);
 
-// Capture a live snapshot from ESP32-CAM stream/capture endpoint and save a validated JPEG to /public/media/
+// Capture a live snapshot from ESP32-CAM stream/capture endpoint and save a validated JPEG to /public/media/.
+// Exclusively resolves backend-configured capture URL.
 const handleCamSnapshot = async (req: express.Request, res: express.Response) => {
-  const { url, filename } = req.body || {};
-  const targetUrl = (url as string) || hardwareAdapter.camera.getDefaultCaptureUrl();
+  const { filename } = req.body || {};
+  const targetUrl = hardwareAdapter.camera.getDefaultCaptureUrl();
 
   const snapResult = await hardwareAdapter.camera.captureSnapshotToFile(targetUrl, mediaDir, filename);
   if (!res.headersSent) {
@@ -1012,10 +1014,17 @@ app.post("/api/rpi-snapshot", handleCamSnapshot);
 app.post("/api/camera/snapshot", handleCamSnapshot);
 
 // Camera Configuration & Status APIs (Authoritative Backend State)
+// Sanitized so the camera's private IP and raw stream/capture URLs are NEVER returned to frontend clients.
 app.get("/api/camera/config", (_req, res) => {
+  const fullCfg = hardwareAdapter.camera.getCameraConfig();
   res.json({
     success: true,
-    config: hardwareAdapter.camera.getCameraConfig(),
+    config: {
+      proxyStreamUrl: "/api/camera/stream",
+      autoConnect: fullCfg.autoConnect,
+      isVerified: fullCfg.isVerified,
+      isCloudEnvironment: fullCfg.isCloudEnvironment,
+    },
   });
 });
 
@@ -1045,7 +1054,16 @@ app.post("/api/camera/config", (req, res) => {
   res.json({
     success: true,
     message: "Camera configuration updated",
-    ...result,
+    status: {
+      ...result.status,
+      targetUrl: result.status.targetUrl ? "/api/camera/stream" : null,
+    },
+    config: {
+      proxyStreamUrl: "/api/camera/stream",
+      autoConnect: result.config.autoConnect,
+      isVerified: result.config.isVerified,
+      isCloudEnvironment: result.config.isCloudEnvironment,
+    },
   });
 });
 
@@ -1055,9 +1073,13 @@ app.get("/api/camera/status", async (req, res) => {
   if (!quick && !status.online && !hardwareAdapter.config.isCloudEnvironment) {
     status = await hardwareAdapter.camera.checkConnection();
   }
+  const sanitizedStatus = {
+    ...status,
+    targetUrl: status.targetUrl ? "/api/camera/stream" : null,
+  };
   res.json({
     success: true,
-    status,
+    status: sanitizedStatus,
   });
 });
 

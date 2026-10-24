@@ -268,7 +268,12 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
       isVerified: env.ESP32_CAM_VERIFIED === "true",
       autoConnect: env.ESP32_CAM_AUTO_CONNECT !== "false",
       reconnectIntervalMs:
-        parseInt(env.ESP32_CAM_RECONNECT_MS || "5000", 10) || 5000,
+        parseInt(
+          env.ESP32_CAM_RECONNECT_INTERVAL_MS ||
+          env.ESP32_CAM_RECONNECT_MS ||
+          "5000",
+          10
+        ) || 5000,
     },
   };
 }

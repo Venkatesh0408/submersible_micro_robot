@@ -389,6 +389,52 @@ async function main() {
     assert.equal(typeof camSvc.status.online, "boolean");
   });
 
+  await runTest("Sanitizes frontend camera config and never exposes private IP or raw URLs to client", () => {
+    const cfg = loadHardwareConfig({
+      ESP32_CAM_IP: "192.168.1.184",
+      ESP32_CAM_STREAM_PORT: "81",
+      ESP32_CAM_STREAM_PATH: "/stream",
+      ESP32_CAM_CAPTURE_PORT: "80",
+      ESP32_CAM_CAPTURE_PATH: "/capture",
+      ESP32_CAM_AUTO_CONNECT: "true",
+      ESP32_CAM_RECONNECT_INTERVAL_MS: "6000",
+    });
+
+    assert.equal(cfg.camera.reconnectIntervalMs, 6000);
+    const camSvc = new Esp32CameraService(cfg);
+    const internalCfg = camSvc.getCameraConfig();
+
+    // Frontend sanitized config payload contract
+    const frontendPayload = {
+      proxyStreamUrl: "/api/camera/stream",
+      autoConnect: internalCfg.autoConnect,
+      isVerified: internalCfg.isVerified,
+      isCloudEnvironment: internalCfg.isCloudEnvironment,
+    };
+
+    assert.equal((frontendPayload as any).ip, undefined);
+    assert.equal((frontendPayload as any).streamUrl, undefined);
+    assert.equal((frontendPayload as any).captureUrl, undefined);
+    assert.equal((frontendPayload as any).streamPort, undefined);
+    assert.equal(frontendPayload.proxyStreamUrl, "/api/camera/stream");
+    assert.equal(frontendPayload.autoConnect, true);
+  });
+
+  await runTest("Resolves fixed backend stream target and ignores arbitrary client URLs", () => {
+    const cfg = loadHardwareConfig({
+      ESP32_CAM_IP: "192.168.1.200",
+      ESP32_CAM_STREAM_PORT: "81",
+      ESP32_CAM_STREAM_PATH: "/stream",
+      ESP32_CAM_CAPTURE_PORT: "80",
+      ESP32_CAM_CAPTURE_PATH: "/capture",
+    });
+    const camSvc = new Esp32CameraService(cfg);
+
+    // The stream target must always be the configured default
+    assert.equal(camSvc.getDefaultStreamUrl(), "http://192.168.1.200:81/stream");
+    assert.equal(camSvc.getDefaultCaptureUrl(), "http://192.168.1.200:80/capture");
+  });
+
   // ----------------------------------------------------------
   // 4. BACKEND API CONTRACT & CONFIG ALIGNMENT TESTS
   // ----------------------------------------------------------

@@ -116,16 +116,28 @@ export async function pingRaspberryPi(streamUrl) {
     return await pingEspCam(streamUrl);
 }
 
-export async function captureEspSnapshot(streamUrl, filename) {
-    return await safeFetchJson(`${BASE_URL}/api/esp-snapshot`, {
+export async function captureEspSnapshot(filenameOrUrl, maybeFilename) {
+    let filename;
+    let url;
+    if (typeof maybeFilename === "string") {
+        url = filenameOrUrl;
+        filename = maybeFilename;
+    } else if (typeof filenameOrUrl === "string") {
+        if (filenameOrUrl.startsWith("http://") || filenameOrUrl.startsWith("https://")) {
+            url = filenameOrUrl;
+        } else {
+            filename = filenameOrUrl;
+        }
+    }
+    return await safeFetchJson(`${BASE_URL}/api/camera/snapshot`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: streamUrl, filename })
+        body: JSON.stringify({ url, filename })
     });
 }
 
-export async function captureRpiSnapshot(streamUrl, filename) {
-    return await captureEspSnapshot(streamUrl, filename);
+export async function captureRpiSnapshot(filenameOrUrl, maybeFilename) {
+    return await captureEspSnapshot(filenameOrUrl, maybeFilename);
 }
 
 export async function getCameraConfig() {
