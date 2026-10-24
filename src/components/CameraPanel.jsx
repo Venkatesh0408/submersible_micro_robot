@@ -5,7 +5,10 @@ import {
   Sparkles, Video, CheckCircle, ShieldAlert, Settings, HelpCircle,
   Copy, Check, Loader2, Radio, Cpu, X
 } from "lucide-react";
-import { fetchMedia, uploadMedia, pingEspCam, captureEspSnapshot } from "../services/api";
+import {
+  fetchMedia, uploadMedia, pingEspCam, captureEspSnapshot,
+  getCameraConfig, getCameraStatus, updateCameraConfig
+} from "../services/api";
 import "../styles/Camera.css";
 
 const STANDARD_CAM_ENVIRONMENTS = ["Water Tank", "River", "Lake", "Pipeline", "Dam", "Wastewater Plant"];
@@ -43,7 +46,7 @@ export default function CameraPanel() {
   const [statusNotice, setStatusNotice] = useState("");
   const [isPlaying, setIsPlaying] = useState(true);
 
-  // ESP32-CAM Wireless WiFi Settings (persisted so the robot's IP survives reloads)
+  // ESP32-CAM Wireless WiFi Settings (backend is authoritative; persisted in localStorage for fallback)
   const [espIp, setEspIp] = useState(() => readLS("espIp", DEFAULT_ESP_IP));
   const [espPort, setEspPort] = useState(() => readLS("espPort", DEFAULT_ESP_PORT));
   const [espPath, setEspPath] = useState(() => readLS("espPath", DEFAULT_ESP_PATH));
@@ -56,6 +59,57 @@ export default function CameraPanel() {
   const [copiedCode, setCopiedCode] = useState(false);
   const [capturingSnapshot, setCapturingSnapshot] = useState(false);
   const [espNoticeDismissed, setEspNoticeDismissed] = useState(false);
+
+  // Fetch authoritative camera configuration & auto-connect status from backend on mount
+  useEffect(() => {
+    let isMounted = true;
+    const initCamera = async () => {
+      try {
+        const res = await getCameraConfig();
+        if (res?.success && res.config && isMounted) {
+          const cfg = res.config;
+          if (cfg.ip) {
+            setEspIp(cfg.ip);
+            try { localStorage.setItem("espIp", cfg.ip); } catch {}
+          }
+          if (cfg.streamPort) {
+            setEspPort(String(cfg.streamPort));
+            try { localStorage.setItem("espPort", String(cfg.streamPort)); } catch {}
+          }
+          if (cfg.streamPath) {
+            setEspPath(cfg.streamPath);
+            try { localStorage.setItem("espPath", cfg.streamPath); } catch {}
+          }
+          // Query backend camera status
+          const statusRes = await getCameraStatus(false);
+          if (isMounted) {
+            if (statusRes?.status?.online) {
+              setEspConnected(true);
+              setEspLatency(statusRes.status.latencyMs ?? null);
+              setEspMessage(`Connected to ESP32-CAM — stream active${statusRes.status.latencyMs ? ` (${statusRes.status.latencyMs}ms)` : ""}`);
+              setActiveSource("esp-wifi");
+            } else if (cfg.autoConnect && !cfg.isCloudEnvironment) {
+              const targetUrl = cfg.streamUrl || `http://${cfg.ip}:${cfg.streamPort}${cfg.streamPath}`;
+              const pingResult = await pingEspCam(targetUrl);
+              if (isMounted && pingResult?.online) {
+                setEspConnected(true);
+                setEspLatency(pingResult.latencyMs ?? null);
+                setEspMessage(`Connected — live stream reachable (${pingResult.latencyMs}ms).`);
+                setActiveSource("esp-wifi");
+              } else if (isMounted) {
+                setEspConnected(false);
+                setEspMessage(statusRes?.status?.message || "ESP32-CAM is offline or standby.");
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load backend camera config:", err);
+      }
+    };
+    initCamera();
+    return () => { isMounted = false; };
+  }, []);
 
   // Re-show the offline notice whenever the connection state flips.
   useEffect(() => { setEspNoticeDismissed(false); }, [espConnected]);
@@ -73,7 +127,7 @@ export default function CameraPanel() {
   // Compute full target ESP32-CAM Stream URL
   const rawEspUrl = `http://${espIp.trim()}:${espPort.trim()}${espPath.trim().startsWith("/") ? espPath.trim() : "/" + espPath.trim()}`;
   const activeEspStreamUrl = espUseProxy 
-    ? `/api/esp-proxy?url=${encodeURIComponent(rawEspUrl)}`
+    ? `/api/camera/stream?url=${encodeURIComponent(rawEspUrl)}`
     : rawEspUrl;
 
   // Load saved video files from backend storage
@@ -110,6 +164,14 @@ export default function CameraPanel() {
     setEspMessage(`Checking ${rawEspUrl} …`);
 
     try {
+      // Sync update to authoritative backend configuration
+      await updateCameraConfig({
+        ip,
+        streamPort: parseInt(espPort.trim(), 10) || 81,
+        streamPath: espPath.trim(),
+        isVerified: true
+      });
+
       const pingResult = await pingEspCam(rawEspUrl);
       if (pingResult?.online) {
         setEspConnected(true);
@@ -154,7 +216,7 @@ export default function CameraPanel() {
         setStatusNotice(`Snapshot captured and saved as ${result.file?.filename || filename}!`);
         setTimeout(() => setStatusNotice(""), 4000);
       } else {
-        setStatusNotice("Failed to save ESP32 snapshot. Retrying...");
+        setStatusNotice(result?.message || "Failed to save ESP32 snapshot.");
         setTimeout(() => setStatusNotice(""), 4000);
       }
     } catch (err) {
@@ -242,10 +304,10 @@ export default function CameraPanel() {
 
       ctx.restore();
 
-      // HUD Overlay details (status is shown by the React banner, not duplicated here)
+      // HUD Overlay details — canvas fallback clearly identified as simulation
       ctx.fillStyle = "#22d3ee";
       ctx.font = "bold 12px monospace";
-      ctx.fillText("● AUTOMATIC STREAM FEED", 20, 30);
+      ctx.fillText("● [SIMULATION] RADAR STANDBY - CAMERA OFFLINE", 20, 30);
 
       animationFrameId = requestAnimationFrame(render);
     };

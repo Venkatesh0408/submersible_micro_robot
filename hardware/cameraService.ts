@@ -19,6 +19,25 @@ export interface CameraPingStatus {
   contentType?: string;
   latencyMs?: number;
   message: string;
+  isVerified?: boolean;
+  failureCount?: number;
+  streamReachable?: boolean;
+  isCloudEnvironment?: boolean;
+}
+
+export interface BackendCameraConfig {
+  ip: string;
+  fallbackIp: string;
+  streamPort: number;
+  capturePort: number;
+  streamPath: string;
+  capturePath: string;
+  streamUrl: string;
+  captureUrl: string;
+  proxyStreamUrl: string;
+  isVerified: boolean;
+  isCloudEnvironment: boolean;
+  autoConnect: boolean;
 }
 
 export interface SnapshotCaptureResult {
@@ -51,6 +70,9 @@ export function validateCamUrl(raw: string): CamUrlValidation {
     return { ok: false, reason: "Only http/https is allowed" };
   }
   const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+    return { ok: false, reason: "Loopback addresses are not permitted" };
+  }
   if (host.endsWith(".local")) {
     return { ok: true, parsedUrl: url };
   }
@@ -90,23 +112,113 @@ export function extractFirstJpegFrame(buffer: Buffer): Buffer | null {
 
 export class Esp32CameraService {
   private config: HardwareConfig;
+  private autoConnectTimer: NodeJS.Timeout | null = null;
+  private isCheckingConnection = false;
+  private consecutiveFailures = 0;
+  private listeners: Array<(status: CameraPingStatus) => void> = [];
+
   private lastStatus: CameraPingStatus = {
     online: false,
     verifiedAtMs: null,
     targetUrl: null,
     message: "ESP32-CAM has not been verified yet.",
+    isVerified: false,
+    failureCount: 0,
+    streamReachable: false,
+    isCloudEnvironment: false,
   };
 
   constructor(config: HardwareConfig) {
     this.config = config;
+    this.lastStatus.isVerified = config.camera.isVerified;
+    this.lastStatus.isCloudEnvironment = config.isCloudEnvironment;
   }
 
   public updateConfig(config: HardwareConfig): void {
     this.config = config;
+    this.lastStatus.isVerified = config.camera.isVerified;
+    this.lastStatus.isCloudEnvironment = config.isCloudEnvironment;
   }
 
   public get status(): CameraPingStatus {
     return { ...this.lastStatus };
+  }
+
+  public onStatusChange(listener: (status: CameraPingStatus) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
+  }
+
+  private notifyListeners(): void {
+    const copy = this.status;
+    for (const l of this.listeners) {
+      try {
+        l(copy);
+      } catch (err) {
+        logger.error("[camera] Error in status listener:", err);
+      }
+    }
+  }
+
+  public getCameraConfig(): BackendCameraConfig {
+    const streamUrl = this.getDefaultStreamUrl();
+    const captureUrl = this.getDefaultCaptureUrl();
+    return {
+      ip: this.config.camera.defaultIp,
+      fallbackIp: this.config.camera.fallbackIp,
+      streamPort: this.config.camera.defaultStreamPort,
+      capturePort: this.config.camera.defaultCapturePort,
+      streamPath: this.config.camera.defaultStreamPath,
+      capturePath: this.config.camera.defaultCapturePath,
+      streamUrl,
+      captureUrl,
+      proxyStreamUrl: "/api/camera/stream",
+      isVerified: this.config.camera.isVerified,
+      isCloudEnvironment: this.config.isCloudEnvironment,
+      autoConnect: this.config.camera.autoConnect,
+    };
+  }
+
+  public updateRuntimeCameraConfig(opts: {
+    ip?: string;
+    streamPort?: number;
+    capturePort?: number;
+    streamPath?: string;
+    capturePath?: string;
+    isVerified?: boolean;
+  }): { config: BackendCameraConfig; status: CameraPingStatus } {
+    if (opts.ip && opts.ip.trim()) {
+      this.config.camera.defaultIp = opts.ip.trim();
+    }
+    if (opts.streamPort && Number.isSafeInteger(opts.streamPort)) {
+      this.config.camera.defaultStreamPort = opts.streamPort;
+    }
+    if (opts.capturePort && Number.isSafeInteger(opts.capturePort)) {
+      this.config.camera.defaultCapturePort = opts.capturePort;
+    }
+    if (opts.streamPath && opts.streamPath.trim()) {
+      this.config.camera.defaultStreamPath = opts.streamPath.trim();
+    }
+    if (opts.capturePath && opts.capturePath.trim()) {
+      this.config.camera.defaultCapturePath = opts.capturePath.trim();
+    }
+    if (typeof opts.isVerified === "boolean") {
+      this.config.camera.isVerified = opts.isVerified;
+    } else {
+      this.config.camera.isVerified = true;
+    }
+    this.lastStatus.isVerified = this.config.camera.isVerified;
+    this.consecutiveFailures = 0;
+
+    // Trigger an immediate check asynchronously
+    this.checkReachability().catch(() => {});
+
+    return {
+      config: this.getCameraConfig(),
+      status: this.status,
+    };
   }
 
   public getDefaultStreamUrl(): string {
@@ -127,6 +239,126 @@ export class Esp32CameraService {
     return `http://${defaultIp}:${defaultCapturePort}${p}`;
   }
 
+  public getFallbackStreamUrl(): string | null {
+    if (!this.config.camera.fallbackIp) return null;
+    const { fallbackIp, defaultStreamPort, defaultStreamPath } = this.config.camera;
+    const p = defaultStreamPath.startsWith("/") ? defaultStreamPath : `/${defaultStreamPath}`;
+    return `http://${fallbackIp}:${defaultStreamPort}${p}`;
+  }
+
+  /**
+   * Background connection manager running flag.
+   */
+  private autoConnectRunning = false;
+
+  public startAutoConnect(): void {
+    if (this.autoConnectRunning) return;
+    if (!this.config.camera.autoConnect) {
+      logger.info("[camera] Camera auto-connect is disabled by configuration");
+      return;
+    }
+    this.autoConnectRunning = true;
+
+    const scheduleNext = () => {
+      if (!this.autoConnectRunning) return;
+      const delayMs = this.lastStatus.online
+        ? 10000 // steady check every 10 seconds when healthy
+        : Math.min(
+            15000,
+            Math.max(2000, 2000 * Math.pow(1.4, Math.min(this.consecutiveFailures, 6)))
+          );
+
+      this.autoConnectTimer = setTimeout(async () => {
+        if (!this.autoConnectRunning) return;
+        try {
+          await this.checkReachability();
+        } catch (err) {
+          logger.error("[camera] Auto-connect check error:", err);
+        } finally {
+          scheduleNext();
+        }
+      }, delayMs);
+
+      if (this.autoConnectTimer && typeof this.autoConnectTimer.unref === "function") {
+        this.autoConnectTimer.unref();
+      }
+    };
+
+    // Run first check right away non-blockingly
+    this.checkReachability().catch((err) => {
+      logger.warn("[camera] Initial camera reachability check notice:", err?.message || err);
+    }).finally(() => {
+      scheduleNext();
+    });
+  }
+
+  public stopAutoConnect(): void {
+    this.autoConnectRunning = false;
+    if (this.autoConnectTimer) {
+      clearTimeout(this.autoConnectTimer);
+      this.autoConnectTimer = null;
+    }
+  }
+
+  public async checkConnection(): Promise<CameraPingStatus> {
+    return this.checkReachability();
+  }
+
+  /**
+   * Periodic check called by autoConnect or manually.
+   */
+  public async checkReachability(): Promise<CameraPingStatus> {
+    if (this.isCheckingConnection) return this.lastStatus;
+    this.isCheckingConnection = true;
+
+    try {
+      const primaryUrl = this.getDefaultStreamUrl();
+      let res = await this.pingCamera(primaryUrl);
+
+      // If primary failed but a fallback is configured, test fallback
+      if (!res.online && this.getFallbackStreamUrl()) {
+        const fallbackUrl = this.getFallbackStreamUrl()!;
+        const fallbackRes = await this.pingCamera(fallbackUrl);
+        if (fallbackRes.online) {
+          res = {
+            ...fallbackRes,
+            message: `ESP32-CAM connected via fallback address (${fallbackUrl})`,
+          };
+        }
+      }
+
+      if (res.online) {
+        this.consecutiveFailures = 0;
+        this.lastStatus = {
+          ...res,
+          isVerified: this.config.camera.isVerified,
+          failureCount: 0,
+          streamReachable: true,
+          isCloudEnvironment: this.config.isCloudEnvironment,
+        };
+      } else {
+        this.consecutiveFailures++;
+        let honestMessage = res.message;
+        if (!this.config.camera.isVerified) {
+          honestMessage = `ESP32-CAM address (${this.config.camera.defaultIp}) is unconfirmed. Check your router DHCP reservation or Serial Monitor output to verify the camera IP.`;
+        }
+        this.lastStatus = {
+          ...res,
+          message: honestMessage,
+          isVerified: this.config.camera.isVerified,
+          failureCount: this.consecutiveFailures,
+          streamReachable: false,
+          isCloudEnvironment: this.config.isCloudEnvironment,
+        };
+      }
+
+      this.notifyListeners();
+      return this.lastStatus;
+    } finally {
+      this.isCheckingConnection = false;
+    }
+  }
+
   /**
    * Verify reachability of an ESP32-CAM URL on the local LAN.
    * Never reports online unless an HTTP 2xx response is actually received within timeout.
@@ -139,6 +371,7 @@ export class Esp32CameraService {
         targetUrl,
         message:
           "Cloud-hosted backend cannot reach a private LAN ESP32-CAM address. Run the backend locally on the same Wi-Fi LAN as the ESP32-CAM.",
+        isCloudEnvironment: true,
       };
       this.lastStatus = status;
       return status;
@@ -151,6 +384,7 @@ export class Esp32CameraService {
         verifiedAtMs: Date.now(),
         targetUrl,
         message: guard.reason || "Invalid camera URL",
+        isCloudEnvironment: false,
       };
     }
 
@@ -162,8 +396,12 @@ export class Esp32CameraService {
       const finish = (res: CameraPingStatus) => {
         if (settled) return;
         settled = true;
-        this.lastStatus = res;
-        resolve(res);
+        this.lastStatus = {
+          ...res,
+          isVerified: this.config.camera.isVerified,
+          isCloudEnvironment: this.config.isCloudEnvironment,
+        };
+        resolve(this.lastStatus);
       };
 
       try {
@@ -227,12 +465,115 @@ export class Esp32CameraService {
   }
 
   /**
-   * Capture a single validated JPEG frame from the ESP32-CAM (either a still `/capture` endpoint
-   * or by extracting the first complete JPEG frame from an MJPEG `/stream` endpoint) and save it to mediaDir.
+   * Proxy the live camera stream from targetUrl to client response.
+   * Handles timeouts, status codes, original content-type / multipart boundary,
+   * client disconnect cleanup, and bounded resource use.
+   */
+  public proxyStream(
+    targetUrl: string,
+    clientReq: http.IncomingMessage,
+    clientRes: http.ServerResponse
+  ): void {
+    if (this.config.isCloudEnvironment) {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(503, { "Content-Type": "text/plain" });
+        clientRes.end(
+          "Cloud backend cannot proxy a private LAN ESP32-CAM stream. Run locally on the robot's LAN."
+        );
+      }
+      return;
+    }
+
+    const guard = validateCamUrl(targetUrl);
+    if (!guard.ok) {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(400, { "Content-Type": "text/plain" });
+        clientRes.end(guard.reason || "Invalid camera URL");
+      }
+      return;
+    }
+
+    try {
+      const protocol = targetUrl.startsWith("https") ? https : http;
+      const proxyReq = protocol.get(
+        targetUrl,
+        { timeout: this.config.camera.pingTimeoutMs * 2 },
+        (proxyRes) => {
+          const statusCode = proxyRes.statusCode || 200;
+          if (statusCode < 200 || statusCode >= 300) {
+            proxyRes.destroy();
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(statusCode, { "Content-Type": "text/plain" });
+              clientRes.end(`ESP32-CAM stream returned HTTP ${statusCode}`);
+            }
+            return;
+          }
+
+          const rawContentType = proxyRes.headers["content-type"];
+          const contentType =
+            rawContentType && rawContentType.includes("multipart")
+              ? rawContentType
+              : "multipart/x-mixed-replace; boundary=frame";
+
+          if (!clientRes.headersSent) {
+            clientRes.writeHead(200, {
+              "Content-Type": contentType,
+              "Cache-Control": "no-cache, no-store, must-revalidate",
+              "Pragma": "no-cache",
+              "Connection": "keep-alive",
+            });
+          }
+
+          proxyRes.pipe(clientRes);
+
+          // Stream cleanup on client disconnect
+          clientReq.on("close", () => {
+            proxyRes.destroy();
+            proxyReq.destroy();
+          });
+
+          proxyRes.on("error", (err) => {
+            logger.error("[camera] Proxy response error:", err);
+            clientRes.destroy();
+          });
+        }
+      );
+
+      proxyReq.on("error", (err) => {
+        logger.error("[camera] Stream proxy connection error:", err);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { "Content-Type": "text/plain" });
+          clientRes.end(`ESP32-CAM Stream Proxy Error: ${err.message}`);
+        }
+      });
+
+      proxyReq.on("timeout", () => {
+        proxyReq.destroy();
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(504, { "Content-Type": "text/plain" });
+          clientRes.end("ESP32-CAM Stream Timeout");
+        }
+      });
+
+      clientReq.on("close", () => {
+        proxyReq.destroy();
+      });
+    } catch (err: any) {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(500, { "Content-Type": "text/plain" });
+        clientRes.end(`Failed to proxy stream: ${err?.message}`);
+      }
+    }
+  }
+
+  /**
+   * Capture a single validated JPEG frame from the ESP32-CAM.
+   * Prefers the still `/capture` endpoint if available, falling back to `/stream` MJPEG extraction.
+   * Validates the resulting image has JPEG SOI (0xFFD8) and EOI (0xFFD9).
    */
   public async captureSnapshotToFile(
-    targetUrl: string,
-    mediaDir: string,
+    targetUrl?: string,
+    mediaDir: string = path.join(process.cwd(), "public", "media"),
     requestedFilename?: string
   ): Promise<SnapshotCaptureResult> {
     if (this.config.isCloudEnvironment) {
@@ -244,7 +585,11 @@ export class Esp32CameraService {
       };
     }
 
-    const guard = validateCamUrl(targetUrl);
+    const captureEndpoint = targetUrl && targetUrl.trim()
+      ? targetUrl.trim()
+      : this.getDefaultCaptureUrl();
+
+    const guard = validateCamUrl(captureEndpoint);
     if (!guard.ok) {
       return {
         success: false,
@@ -256,152 +601,118 @@ export class Esp32CameraService {
     const safeName = requestedFilename
       ? path.basename(requestedFilename).replace(/[^a-zA-Z0-9_.-]/g, "_")
       : `esp-snapshot-${Date.now()}.jpg`;
+
+    if (!fsLib.existsSync(mediaDir)) {
+      fsLib.mkdirSync(mediaDir, { recursive: true });
+    }
     const targetPath = path.join(mediaDir, safeName);
     const timeoutMs = this.config.camera.snapshotTimeoutMs;
 
-    return new Promise<SnapshotCaptureResult>((resolve) => {
-      let settled = false;
-      const finish = (res: SnapshotCaptureResult) => {
-        if (settled) return;
-        settled = true;
-        resolve(res);
-      };
-
-      try {
-        const protocol = targetUrl.startsWith("https") ? https : http;
-        const req = protocol.get(targetUrl, { timeout: timeoutMs }, (streamRes) => {
-          const statusCode = streamRes.statusCode || 0;
-          if (statusCode < 200 || statusCode >= 300) {
-            streamRes.destroy();
-            return finish({
-              success: false,
-              simulated: false,
-              message: `ESP32-CAM returned HTTP ${statusCode} during snapshot capture`,
-            });
-          }
-
-          const chunks: Buffer[] = [];
-          let totalBytes = 0;
-
-          streamRes.on("data", (chunk: Buffer) => {
-            chunks.push(chunk);
-            totalBytes += chunk.length;
-
-            const combined = Buffer.concat(chunks, totalBytes);
-            const jpegFrame = extractFirstJpegFrame(combined);
-            if (jpegFrame && jpegFrame.length >= 64) {
-              // Complete JPEG frame extracted (works for both single JPEG and infinite MJPEG stream!)
+    // Helper to attempt fetch from an endpoint
+    const tryFetchFrame = (url: string): Promise<Buffer | null> => {
+      return new Promise<Buffer | null>((resolve) => {
+        try {
+          const protocol = url.startsWith("https") ? https : http;
+          const req = protocol.get(url, { timeout: timeoutMs }, (streamRes) => {
+            const statusCode = streamRes.statusCode || 0;
+            if (statusCode < 200 || statusCode >= 300) {
               streamRes.destroy();
-              req.destroy();
-              try {
-                fsLib.writeFileSync(targetPath, jpegFrame);
-                logger.info(
-                  `[camera] Saved verified ESP32-CAM JPEG snapshot (${jpegFrame.length} bytes) to ${targetPath}`
-                );
-                this.lastStatus = {
-                  online: true,
-                  verifiedAtMs: Date.now(),
-                  targetUrl,
-                  statusCode: 200,
-                  message: "ESP32-CAM snapshot captured",
-                };
-                finish({
-                  success: true,
-                  simulated: false,
-                  message: "Snapshot captured from ESP32-CAM and saved to /public/media/",
-                  file: {
-                    filename: safeName,
-                    url: `/media/${safeName}`,
-                    sizeBytes: jpegFrame.length,
-                  },
-                });
-              } catch (writeErr: any) {
-                finish({
-                  success: false,
-                  simulated: false,
-                  message: `Failed to write snapshot to disk: ${writeErr?.message}`,
-                });
+              return resolve(null);
+            }
+
+            const chunks: Buffer[] = [];
+            let totalBytes = 0;
+
+            streamRes.on("data", (chunk: Buffer) => {
+              chunks.push(chunk);
+              totalBytes += chunk.length;
+
+              const combined = Buffer.concat(chunks, totalBytes);
+              const jpegFrame = extractFirstJpegFrame(combined);
+              if (jpegFrame && jpegFrame.length >= 64) {
+                streamRes.destroy();
+                req.destroy();
+                return resolve(jpegFrame);
               }
-              return;
-            }
 
-            if (totalBytes > MAX_SNAPSHOT_BYTES) {
-              streamRes.destroy();
-              req.destroy();
-              finish({
-                success: false,
-                simulated: false,
-                message: "Camera response exceeded maximum frame buffer size without a valid JPEG frame.",
-              });
-            }
-          });
-
-          streamRes.on("end", () => {
-            if (settled) return;
-            const combined = Buffer.concat(chunks, totalBytes);
-            const jpegFrame = extractFirstJpegFrame(combined);
-            if (!jpegFrame || jpegFrame.length < 64) {
-              finish({
-                success: false,
-                simulated: false,
-                message: "ESP32-CAM response did not contain a valid JPEG image frame.",
-              });
-              return;
-            }
-            try {
-              fsLib.writeFileSync(targetPath, jpegFrame);
-              finish({
-                success: true,
-                simulated: false,
-                message: "Snapshot captured from ESP32-CAM and saved to /public/media/",
-                file: {
-                  filename: safeName,
-                  url: `/media/${safeName}`,
-                  sizeBytes: jpegFrame.length,
-                },
-              });
-            } catch (writeErr: any) {
-              finish({
-                success: false,
-                simulated: false,
-                message: `Failed to write snapshot to disk: ${writeErr?.message}`,
-              });
-            }
-          });
-
-          streamRes.on("error", (err) => {
-            if (settled) return;
-            finish({
-              success: false,
-              simulated: false,
-              message: `ESP32-CAM stream error during snapshot: ${err.message}`,
+              if (totalBytes > MAX_SNAPSHOT_BYTES) {
+                streamRes.destroy();
+                req.destroy();
+                return resolve(null);
+              }
             });
-          });
-        });
 
-        req.on("error", (err) => {
-          finish({
-            success: false,
-            simulated: false,
-            message: `Failed to capture ESP32-CAM frame: ${err.message}`,
-          });
-        });
+            streamRes.on("end", () => {
+              const combined = Buffer.concat(chunks, totalBytes);
+              const jpegFrame = extractFirstJpegFrame(combined);
+              resolve(jpegFrame && jpegFrame.length >= 64 ? jpegFrame : null);
+            });
 
-        req.on("timeout", () => {
-          req.destroy();
-          finish({
-            success: false,
-            simulated: false,
-            message: `ESP32-CAM snapshot timed out after ${timeoutMs}ms at ${targetUrl}`,
+            streamRes.on("error", () => resolve(null));
           });
-        });
-      } catch (err: any) {
-        finish({
-          success: false,
-          simulated: false,
-          message: err?.message || "ESP32-CAM snapshot capture failed",
-        });
+
+          req.on("error", () => resolve(null));
+          req.on("timeout", () => {
+            req.destroy();
+            resolve(null);
+          });
+        } catch {
+          resolve(null);
+        }
+      });
+    };
+
+    // 1. Try configured capture endpoint (port 80 /capture)
+    let frame = await tryFetchFrame(captureEndpoint);
+
+    // 2. If capture endpoint failed, try the stream endpoint (port 81 /stream)
+    if (!frame) {
+      const streamEndpoint = this.getDefaultStreamUrl();
+      if (streamEndpoint !== captureEndpoint) {
+        frame = await tryFetchFrame(streamEndpoint);
       }
-    });
+    }
+
+    if (!frame || frame.length < 64) {
+      return {
+        success: false,
+        simulated: false,
+        message: `Failed to capture JPEG snapshot from ESP32-CAM at ${captureEndpoint}. Verify the camera is powered on and streaming.`,
+      };
+    }
+
+    try {
+      fsLib.writeFileSync(targetPath, frame);
+      logger.info(
+        `[camera] Saved verified ESP32-CAM JPEG snapshot (${frame.length} bytes) to ${targetPath}`
+      );
+      this.lastStatus = {
+        online: true,
+        verifiedAtMs: Date.now(),
+        targetUrl: captureEndpoint,
+        statusCode: 200,
+        message: "ESP32-CAM snapshot captured",
+        isVerified: this.config.camera.isVerified,
+        failureCount: 0,
+        streamReachable: true,
+        isCloudEnvironment: this.config.isCloudEnvironment,
+      };
+      return {
+        success: true,
+        simulated: false,
+        message: "Snapshot captured from ESP32-CAM and saved to /public/media/",
+        file: {
+          filename: safeName,
+          url: `/media/${safeName}`,
+          sizeBytes: frame.length,
+        },
+      };
+    } catch (writeErr: any) {
+      return {
+        success: false,
+        simulated: false,
+        message: `Failed to write snapshot to disk: ${writeErr?.message}`,
+      };
+    }
   }
 }

@@ -3,7 +3,7 @@ import { loadHardwareConfig } from "./config.js";
 import { parseControllerLine, formatHostCommand } from "./protocol.js";
 import { MockSerialTransport } from "./transport.js";
 import { ControllerCommunicationService } from "./controllerService.js";
-import { validateCamUrl, extractFirstJpegFrame } from "./cameraService.js";
+import { validateCamUrl, extractFirstJpegFrame, Esp32CameraService } from "./cameraService.js";
 import { HardwareAdapter, SimulatedRobotState } from "./hardwareAdapter.js";
 
 let passed = 0;
@@ -335,6 +335,60 @@ async function main() {
     assert.equal(extractFirstJpegFrame(incomplete), null);
   });
 
+  await runTest("Loads backend authoritative camera config and constructs correct stream/capture URLs", () => {
+    const cfg = loadHardwareConfig({
+      ESP32_CAM_IP: "192.168.1.184",
+      ESP32_CAM_STREAM_PORT: "81",
+      ESP32_CAM_CAPTURE_PORT: "80",
+      ESP32_CAM_STREAM_PATH: "/stream",
+      ESP32_CAM_CAPTURE_PATH: "/capture",
+      ESP32_CAM_VERIFIED: "true",
+      ESP32_CAM_AUTO_CONNECT: "true",
+    });
+
+    const camSvc = new Esp32CameraService(cfg);
+    const backendConfig = camSvc.getCameraConfig();
+
+    assert.equal(backendConfig.ip, "192.168.1.184");
+    assert.equal(backendConfig.streamPort, 81);
+    assert.equal(backendConfig.capturePort, 80);
+    assert.equal(backendConfig.streamUrl, "http://192.168.1.184:81/stream");
+    assert.equal(backendConfig.captureUrl, "http://192.168.1.184:80/capture");
+    assert.equal(backendConfig.isVerified, true);
+    assert.equal(backendConfig.autoConnect, true);
+
+    // Test runtime reconfiguration
+    const updated = camSvc.updateRuntimeCameraConfig({
+      ip: "10.0.0.55",
+      streamPort: 8080,
+      streamPath: "/video",
+    });
+    assert.equal(updated.config.ip, "10.0.0.55");
+    assert.equal(updated.config.streamPort, 8080);
+    assert.equal(updated.config.streamUrl, "http://10.0.0.55:8080/video");
+    assert.equal(camSvc.getDefaultStreamUrl(), "http://10.0.0.55:8080/video");
+  });
+
+  await runTest("Auto-connect lifecycle and status listener manage background timers safely", () => {
+    const cfg = loadHardwareConfig({
+      ESP32_CAM_IP: "192.168.1.184",
+      ESP32_CAM_AUTO_CONNECT: "true",
+      ESP32_CAM_RECONNECT_MS: "1000",
+    });
+
+    const camSvc = new Esp32CameraService(cfg);
+    let notified = false;
+    const unsubscribe = camSvc.onStatusChange((_status) => {
+      notified = true;
+    });
+
+    // Start auto-connect, verify it doesn't crash or hang, and stops cleanly
+    camSvc.startAutoConnect();
+    camSvc.stopAutoConnect();
+    unsubscribe();
+    assert.equal(typeof camSvc.status.online, "boolean");
+  });
+
   // ----------------------------------------------------------
   // 4. BACKEND API CONTRACT & CONFIG ALIGNMENT TESTS
   // ----------------------------------------------------------
@@ -491,6 +545,7 @@ async function main() {
   if (failed > 0) {
     process.exit(1);
   }
+  process.exit(0);
 }
 
 main().catch((err) => {

@@ -80,12 +80,16 @@ export interface HardwareConfig {
     streamUrl: string;
     snapshotUrl: string;
     defaultIp: string;
+    fallbackIp: string;
     defaultStreamPort: number;
     defaultCapturePort: number;
     defaultStreamPath: string;
     defaultCapturePath: string;
     pingTimeoutMs: number;
     snapshotTimeoutMs: number;
+    isVerified: boolean;
+    autoConnect: boolean;
+    reconnectIntervalMs: number;
   };
 }
 
@@ -245,6 +249,7 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
       streamUrl: (env.ESP32_CAM_STREAM_URL || "").trim(),
       snapshotUrl: (env.ESP32_CAM_SNAPSHOT_URL || "").trim(),
       defaultIp: (env.ESP32_CAM_IP || env.VITE_ESP_DEFAULT_IP || "192.168.1.100").trim(),
+      fallbackIp: (env.ESP32_CAM_FALLBACK_IP || "").trim(),
       defaultStreamPort:
         parseInt(env.ESP32_CAM_STREAM_PORT || env.VITE_ESP_DEFAULT_PORT || "81", 10) || 81,
       defaultCapturePort: parseInt(env.ESP32_CAM_CAPTURE_PORT || "80", 10) || 80,
@@ -260,6 +265,10 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
       snapshotTimeoutMs:
         parseInt(env.ESP32_CAM_SNAPSHOT_TIMEOUT_MS || String(camTimeoutDefault), 10) ||
         camTimeoutDefault,
+      isVerified: env.ESP32_CAM_VERIFIED === "true",
+      autoConnect: env.ESP32_CAM_AUTO_CONNECT !== "false",
+      reconnectIntervalMs:
+        parseInt(env.ESP32_CAM_RECONNECT_MS || "5000", 10) || 5000,
     },
   };
 }

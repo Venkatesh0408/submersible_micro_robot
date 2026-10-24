@@ -128,6 +128,22 @@ export async function captureRpiSnapshot(streamUrl, filename) {
     return await captureEspSnapshot(streamUrl, filename);
 }
 
+export async function getCameraConfig() {
+    return await safeFetchJson(`${BASE_URL}/api/camera/config`);
+}
+
+export async function getCameraStatus(quick = true) {
+    return await safeFetchJson(`${BASE_URL}/api/camera/status?quick=${quick ? "true" : "false"}`);
+}
+
+export async function updateCameraConfig(config) {
+    return await safeFetchJson(`${BASE_URL}/api/camera/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+    });
+}
+
 // ======================================================
 // SENSOR
 // ======================================================

@@ -975,91 +975,33 @@ app.get("/api/rpi-ping", handleCamPing);
 
 // Proxy ESP32-CAM MJPEG camera stream to avoid browser CORS/Mixed-Content issues
 const handleCamProxy = (req: express.Request, res: express.Response) => {
-  const targetUrl = req.query.url as string;
-  if (!targetUrl) {
-    if (!res.headersSent) return res.status(400).send("Missing ESP32-CAM stream URL");
-    return;
-  }
-  if (hardwareAdapter.config.isCloudEnvironment) {
-    if (!res.headersSent) {
-      return res.status(503).send("Cloud backend cannot proxy a private LAN ESP32-CAM stream. Run locally on the robot's LAN.");
-    }
-    return;
-  }
-  const guard = validateCamUrl(targetUrl);
-  if (!guard.ok) {
-    if (!res.headersSent) return res.status(400).send(guard.reason);
-    return;
-  }
-
-  try {
-    const protocol = targetUrl.startsWith("https") ? https : http;
-    const proxyReq = protocol.get(targetUrl, { timeout: 10000 }, (proxyRes) => {
-      if (res.headersSent) return;
-      res.writeHead(proxyRes.statusCode || 200, {
-        "Content-Type": proxyRes.headers["content-type"] || "multipart/x-mixed-replace; boundary=frame",
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Connection": "keep-alive"
-      });
-
-      proxyRes.pipe(res);
-
-      req.on("close", () => {
-        proxyRes.destroy();
-      });
-    });
-
-    proxyReq.on("error", (err) => {
-      logger.error("ESP32-CAM Stream Proxy Error:", err);
-      if (!res.headersSent) {
-        res.status(502).send(`ESP32-CAM Stream Proxy Error: ${err.message}`);
-      }
-    });
-
-    proxyReq.on("timeout", () => {
-      proxyReq.destroy();
-      if (!res.headersSent) {
-        res.status(504).send("ESP32-CAM Stream Timeout");
-      }
-    });
-  } catch (err: any) {
-    if (!res.headersSent) {
-      res.status(500).send(`Failed to proxy stream: ${err.message}`);
-    }
-  }
+  const targetUrl = (req.query.url as string) || hardwareAdapter.camera.getDefaultStreamUrl();
+  hardwareAdapter.camera.proxyStream(targetUrl, req, res);
 };
 
 app.get("/api/esp-proxy", handleCamProxy);
 app.get("/api/rpi-proxy", handleCamProxy);
+app.get("/api/camera/stream", handleCamProxy);
 
 // Capture a live snapshot from ESP32-CAM stream/capture endpoint and save a validated JPEG to /public/media/
 const handleCamSnapshot = async (req: express.Request, res: express.Response) => {
   const { url, filename } = req.body || {};
-  if (!url) {
-    if (!res.headersSent) return res.status(400).json({ success: false, message: "Missing stream URL" });
-    return;
-  }
-  const guard = validateCamUrl(url);
-  if (!guard.ok) {
-    if (!res.headersSent) return res.status(400).json({ success: false, message: guard.reason });
-    return;
-  }
+  const targetUrl = (url as string) || hardwareAdapter.camera.getDefaultCaptureUrl();
 
-  const snapResult = await hardwareAdapter.camera.captureSnapshotToFile(url, mediaDir, filename);
+  const snapResult = await hardwareAdapter.camera.captureSnapshotToFile(targetUrl, mediaDir, filename);
   if (!res.headersSent) {
     if (snapResult.success && snapResult.file) {
       res.json({
         success: true,
         simulated: false,
         message: snapResult.message,
-        file: snapResult.file
+        file: snapResult.file,
       });
     } else {
       res.status(502).json({
         success: false,
         simulated: false,
-        message: snapResult.message
+        message: snapResult.message,
       });
     }
   }
@@ -1067,6 +1009,57 @@ const handleCamSnapshot = async (req: express.Request, res: express.Response) =>
 
 app.post("/api/esp-snapshot", handleCamSnapshot);
 app.post("/api/rpi-snapshot", handleCamSnapshot);
+app.post("/api/camera/snapshot", handleCamSnapshot);
+
+// Camera Configuration & Status APIs (Authoritative Backend State)
+app.get("/api/camera/config", (_req, res) => {
+  res.json({
+    success: true,
+    config: hardwareAdapter.camera.getCameraConfig(),
+  });
+});
+
+app.post("/api/camera/config", (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({
+      success: false,
+      message: "Updating hardware camera configuration is restricted to local host execution.",
+    });
+  }
+  const { ip, streamPort, capturePort, streamPath, capturePath, isVerified } = req.body || {};
+  if (ip && typeof ip === "string") {
+    const testUrl = `http://${ip}:${streamPort || 81}${streamPath || "/stream"}`;
+    const guard = validateCamUrl(testUrl);
+    if (!guard.ok) {
+      return res.status(400).json({ success: false, message: guard.reason });
+    }
+  }
+  const result = hardwareAdapter.camera.updateRuntimeCameraConfig({
+    ip,
+    streamPort: streamPort !== undefined ? Number(streamPort) : undefined,
+    capturePort: capturePort !== undefined ? Number(capturePort) : undefined,
+    streamPath,
+    capturePath,
+    isVerified: typeof isVerified === "boolean" ? isVerified : undefined,
+  });
+  res.json({
+    success: true,
+    message: "Camera configuration updated",
+    ...result,
+  });
+});
+
+app.get("/api/camera/status", async (req, res) => {
+  const quick = req.query.quick === "true";
+  let status = hardwareAdapter.camera.status;
+  if (!quick && !status.online && !hardwareAdapter.config.isCloudEnvironment) {
+    status = await hardwareAdapter.camera.checkConnection();
+  }
+  res.json({
+    success: true,
+    status,
+  });
+});
 
 // ==========================================================
 // IMAGE-TO-3D PREVIEW (experimental, visualization-only)
@@ -1887,6 +1880,10 @@ async function startServer() {
     if (hardwareAdapter.mode === "REAL" && hardwareAdapter.config.controller.serialPort) {
       const conn = await hardwareAdapter.connectController();
       logger.info(`[Hardware Startup] ${conn.message} (Propulsion remains DISARMED on startup)`);
+    }
+    if (hardwareAdapter.config.camera.autoConnect && !hardwareAdapter.config.isCloudEnvironment) {
+      hardwareAdapter.camera.startAutoConnect();
+      logger.info(`[Camera Startup] Asynchronous ESP32-CAM auto-connect manager started.`);
     }
   });
 }
