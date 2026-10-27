@@ -435,6 +435,25 @@ async function main() {
     assert.equal(camSvc.getDefaultCaptureUrl(), "http://192.168.1.200:80/capture");
   });
 
+  await runTest("Resolves stream URL from ESP32_CAM_STREAM_URL and reports truthful offline status", async () => {
+    const cfg = loadHardwareConfig({
+      ESP32_CAM_STREAM_URL: "http://10.41.235.60/stream",
+      ESP32_CAM_AUTO_CONNECT: "false",
+      ESP32_CAM_TIMEOUT_MS: "300",
+    });
+
+    assert.equal(cfg.camera.streamUrl, "http://10.41.235.60/stream");
+    const camSvc = new Esp32CameraService(cfg);
+    assert.equal(camSvc.getDefaultStreamUrl(), "http://10.41.235.60/stream");
+    assert.equal(camSvc.getDefaultCaptureUrl(), "http://10.41.235.60:80/capture");
+
+    // Ping will fail honestly because camera is powered off
+    const status = await camSvc.pingCamera(camSvc.getDefaultStreamUrl());
+    assert.equal(status.online, false);
+    // Ensure message does not expose internal IP
+    assert.ok(!status.message.includes("10.41.235.60"));
+  });
+
   // ----------------------------------------------------------
   // 4. BACKEND API CONTRACT & CONFIG ALIGNMENT TESTS
   // ----------------------------------------------------------

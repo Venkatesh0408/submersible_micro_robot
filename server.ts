@@ -946,18 +946,8 @@ app.delete("/api/media/:filename", (req, res) => {
 // ==========================================================
 
 // Ping/Test ESP32-CAM Camera connection over WiFi
-const handleCamPing = async (req: express.Request, res: express.Response) => {
-  const targetUrl = req.query.url as string;
-  if (!targetUrl) {
-    if (!res.headersSent) return res.status(400).json({ online: false, message: "Missing target stream URL" });
-    return;
-  }
-  const guard = validateCamUrl(targetUrl);
-  if (!guard.ok) {
-    if (!res.headersSent) return res.status(400).json({ online: false, message: guard.reason });
-    return;
-  }
-
+const handleCamPing = async (_req: express.Request, res: express.Response) => {
+  const targetUrl = hardwareAdapter.camera.getDefaultStreamUrl();
   const status = await hardwareAdapter.camera.pingCamera(targetUrl);
   if (!res.headersSent) {
     res.json({
@@ -965,7 +955,9 @@ const handleCamPing = async (req: express.Request, res: express.Response) => {
       status: status.statusCode,
       contentType: status.contentType || "video/mjpeg",
       latencyMs: status.latencyMs,
-      message: status.message
+      message: status.online
+        ? "ESP32-CAM stream is reachable."
+        : "ESP32-CAM is not reachable. Check power, Wi-Fi, and backend configuration."
     });
   }
 };
@@ -1073,13 +1065,22 @@ app.get("/api/camera/status", async (req, res) => {
   if (!quick && !status.online && !hardwareAdapter.config.isCloudEnvironment) {
     status = await hardwareAdapter.camera.checkConnection();
   }
-  const sanitizedStatus = {
-    ...status,
-    targetUrl: status.targetUrl ? "/api/camera/stream" : null,
-  };
   res.json({
     success: true,
-    status: sanitizedStatus,
+    status: {
+      online: status.online,
+      verifiedAtMs: status.verifiedAtMs,
+      statusCode: status.statusCode,
+      contentType: status.contentType,
+      latencyMs: status.latencyMs,
+      isVerified: status.isVerified,
+      failureCount: status.failureCount,
+      streamReachable: status.streamReachable,
+      isCloudEnvironment: status.isCloudEnvironment,
+      message: status.online
+        ? "ESP32-CAM stream is reachable."
+        : "ESP32-CAM is offline or unreachable. Check its power, Wi-Fi, and backend configuration.",
+    },
   });
 });
 

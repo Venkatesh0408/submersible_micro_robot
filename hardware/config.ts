@@ -172,6 +172,14 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
 
   const camTimeoutDefault = parseInt(env.ESP32_CAM_TIMEOUT_MS || "5000", 10) || 5000;
 
+  const explicitStreamUrl = (env.ESP32_CAM_STREAM_URL || "").trim();
+  let streamHostIp = "";
+  if (explicitStreamUrl) {
+    try {
+      streamHostIp = new URL(explicitStreamUrl).hostname;
+    } catch {}
+  }
+
   return {
     mode,
     isCloudEnvironment,
@@ -246,16 +254,15 @@ export function loadHardwareConfig(env: NodeJS.ProcessEnv = process.env): Hardwa
       },
     },
     camera: {
-      streamUrl: (env.ESP32_CAM_STREAM_URL || "").trim(),
+      streamUrl: explicitStreamUrl,
       snapshotUrl: (env.ESP32_CAM_SNAPSHOT_URL || "").trim(),
-      defaultIp: (env.ESP32_CAM_IP || env.VITE_ESP_DEFAULT_IP || "192.168.1.100").trim(),
+      defaultIp: (env.ESP32_CAM_IP || streamHostIp || "192.168.1.100").trim(),
       fallbackIp: (env.ESP32_CAM_FALLBACK_IP || "").trim(),
       defaultStreamPort:
-        parseInt(env.ESP32_CAM_STREAM_PORT || env.VITE_ESP_DEFAULT_PORT || "81", 10) || 81,
+        parseInt(env.ESP32_CAM_STREAM_PORT || "81", 10) || 81,
       defaultCapturePort: parseInt(env.ESP32_CAM_CAPTURE_PORT || "80", 10) || 80,
       defaultStreamPath: (
         env.ESP32_CAM_STREAM_PATH ||
-        env.VITE_ESP_DEFAULT_PATH ||
         "/stream"
       ).trim(),
       defaultCapturePath: (env.ESP32_CAM_CAPTURE_PATH || "/capture").trim(),

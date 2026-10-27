@@ -108,36 +108,24 @@ export async function deleteMedia(filename) {
     });
 }
 
-export async function pingEspCam(streamUrl) {
-    return await safeFetchJson(`${BASE_URL}/api/esp-ping?url=${encodeURIComponent(streamUrl)}`);
+export async function pingEspCam() {
+    return await safeFetchJson(`${BASE_URL}/api/esp-ping`);
 }
 
-export async function pingRaspberryPi(streamUrl) {
-    return await pingEspCam(streamUrl);
+export async function pingRaspberryPi() {
+    return await pingEspCam();
 }
 
-export async function captureEspSnapshot(filenameOrUrl, maybeFilename) {
-    let filename;
-    let url;
-    if (typeof maybeFilename === "string") {
-        url = filenameOrUrl;
-        filename = maybeFilename;
-    } else if (typeof filenameOrUrl === "string") {
-        if (filenameOrUrl.startsWith("http://") || filenameOrUrl.startsWith("https://")) {
-            url = filenameOrUrl;
-        } else {
-            filename = filenameOrUrl;
-        }
-    }
+export async function captureEspSnapshot(filename) {
     return await safeFetchJson(`${BASE_URL}/api/camera/snapshot`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, filename })
+        body: JSON.stringify({ filename })
     });
 }
 
-export async function captureRpiSnapshot(filenameOrUrl, maybeFilename) {
-    return await captureEspSnapshot(filenameOrUrl, maybeFilename);
+export async function captureRpiSnapshot(filename) {
+    return await captureEspSnapshot(filename);
 }
 
 export async function getCameraConfig() {
