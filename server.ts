@@ -1062,11 +1062,13 @@ function writeRelayMjpegFrame(client: express.Response, frame: Buffer): void {
 function getCameraRelayStatus() {
   const ageMs = latestRelayFrameAtMs ? Date.now() - latestRelayFrameAtMs : null;
   const recent = relayFrameTimes.filter((t) => Date.now() - t <= 2000);
+  const sampleSpanMs = recent.length > 1 ? recent[recent.length - 1] - recent[0] : 0;
+  const measuredFps = sampleSpanMs > 0 ? (recent.length - 1) * 1000 / sampleSpanMs : recent.length;
   return {
     online: Boolean(latestRelayFrame && ageMs !== null && ageMs <= CAMERA_RELAY_STALE_MS),
     verifiedAtMs: latestRelayFrameAtMs || null,
     frameAgeMs: ageMs,
-    fps: recent.length > 1 ? Math.round((recent.length - 1) / 2 * 10) / 10 : recent.length,
+    fps: Math.round(measuredFps * 10) / 10,
     frameBytes: latestRelayFrame?.length || 0,
     isCloudEnvironment: hardwareAdapter.config.isCloudEnvironment,
     message: latestRelayFrame && ageMs !== null && ageMs <= CAMERA_RELAY_STALE_MS
