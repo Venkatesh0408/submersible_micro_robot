@@ -30,7 +30,7 @@ In the same PowerShell window, set it for this session:
 
 Replace CAMERA_IP with the current IP printed by the ESP32-CAM:
 
-    py tools/camera_gateway.py --camera-url "http://CAMERA_IP:81/stream" --fps 20
+    py tools/camera_gateway.py --camera-url "http://CAMERA_IP:81/stream" --fps 40
 
 Keep this PowerShell window open while using the dashboard. The script reconnects automatically if the camera stream drops. Press Ctrl+C to stop it.
 
@@ -43,9 +43,10 @@ Keep this PowerShell window open while using the dashboard. The script reconnect
 
 ## Performance tuning
 
-- Start at --fps 15 if the hotspot or Render connection is unstable.
-- Try --fps 20 after the stream is stable. The gateway caps uploads at the selected rate.
-- Use QVGA (320x240) first for troubleshooting; VGA (640x480) is the preferred initial dashboard target if the camera can sustain it.
+- For the highest frame rate, configure the ESP32-CAM for QVGA (320x240), JPEG output, and a moderate JPEG quality setting; try 30 FPS first, then 40 FPS if the stream remains stable.
+- For a clearer image, use VGA (640x480) and start around 15-20 FPS; the camera sensor and Wi-Fi link may not sustain 40 FPS at VGA.
+- The gateway supports up to 40 FPS, matching the server-side 40 FPS safety ceiling. This is a ceiling, not a guarantee. If uploads cannot keep up, measured FPS will be lower.
+- Keep the laptop close to the 2.4 GHz hotspot and avoid other heavy uploads while streaming.
 - The displayed FPS is measured from frames received by Render, not a promised camera sensor frame rate.
 - Actual FPS depends on ESP32-CAM sensor settings, JPEG size, hotspot quality, laptop upload bandwidth, and Render service capacity.
 
