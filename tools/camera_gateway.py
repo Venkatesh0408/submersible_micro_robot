@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Relay ESP32-CAM MJPEG to the VSTY Render dashboard.")
     parser.add_argument("--camera-url", default=DEFAULT_CAMERA, help="Local ESP32-CAM MJPEG URL")
     parser.add_argument("--server-url", default=DEFAULT_SERVER, help="VSTY Render server base URL")
-    parser.add_argument("--fps", type=float, default=30.0, help="Maximum upload frame rate (default: 30; server safety ceiling: 40)")
+    parser.add_argument("--fps", type=float, default=40.0, help="Maximum upload frame rate (default: 40; server safety ceiling: 40)")
     parser.add_argument("--max-frame-bytes", type=int, default=MAX_FRAME_BYTES)
     return parser.parse_args()
 
@@ -117,6 +117,10 @@ def main():
                     if result.status_code == 403:
                         print("ERROR: This login does not have operator/admin access to the camera relay.")
                         return 3
+                    if result.status_code == 429:
+                        # Drop this frame and keep the stream moving; never build a backlog.
+                        time.sleep(0.01)
+                        continue
                     if result.status_code == 413:
                         print("ERROR: Frame too large. Lower ESP32-CAM resolution or increase JPEG compression.")
                         return 4
