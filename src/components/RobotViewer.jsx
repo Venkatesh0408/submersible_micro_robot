@@ -5,7 +5,7 @@ import {
     useGLTF, useProgress, AdaptiveDpr, AdaptiveEvents,
 } from "@react-three/drei";
 import { useReducedMotion } from "framer-motion";
-import { Boxes, Box as BoxIcon, RotateCcw, RefreshCw, MousePointer2, X, TriangleAlert } from "lucide-react";
+import { Boxes, Box as BoxIcon, RotateCcw, RefreshCw, MousePointer2, X, TriangleAlert, Play, Pause } from "lucide-react";
 import * as THREE from "three";
 import "../styles/RobotViewer.css";
 
@@ -30,10 +30,12 @@ function hasWebGL() {
 function Model({ url, active }) {
     const { scene } = useGLTF(url, DRACO);
     const opacity = useRef(active ? 1 : 0);
+    const baseCenter = useRef(new THREE.Vector3());
 
     useEffect(() => {
         const box = new THREE.Box3().setFromObject(scene);
         const c = box.getCenter(new THREE.Vector3());
+        baseCenter.current.copy(c);
         scene.position.set(-c.x, -box.min.y, -c.z); // centered on X/Z, resting on y=0
         scene.traverse((o) => {
             if (o.isMesh && o.material && !o.material.userData.__cf) {
@@ -46,10 +48,13 @@ function Model({ url, active }) {
         });
     }, [scene]);
 
-    useFrame((_, delta) => {
+    useFrame((state, delta) => {
         opacity.current = THREE.MathUtils.damp(opacity.current, active ? 1 : 0, 5, delta);
         scene.visible = opacity.current > 0.015;
         scene.traverse((o) => { if (o.isMesh && o.material) o.material.opacity = opacity.current; });
+        const time = state.clock.getElapsedTime();
+        const hoverOffset = Math.sin(time * 1.4) * 0.012;
+        scene.position.y = -baseCenter.current.y + hoverOffset;
     });
 
     return <primitive object={scene} />;
@@ -107,7 +112,7 @@ function Framing({ exploded, resetKey, reduce }) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [exploded]);
 
-    useFrame((_, delta) => {
+    useFrame((state, delta) => {
         const a = anim.current;
         if (!a || !controls) return;
         a.t = Math.min(1, a.t + delta / a.dur);
@@ -183,6 +188,25 @@ export default function RobotViewer() {
     const [webgl] = useState(hasWebGL);
     const [exploded, setExploded] = useState(false);
     const [autoRotateOn, setAutoRotateOn] = useState(!reduce);
+    const [isAutoAnimating, setIsAutoAnimating] = useState(false);
+
+    useEffect(() => {
+        if (!isAutoAnimating) return;
+        const timer = setInterval(() => {
+            setExploded((prev) => !prev);
+        }, 4500);
+        return () => clearInterval(timer);
+    }, [isAutoAnimating]);
+
+    const toggleAutoAnimate = useCallback(() => {
+        setIsAutoAnimating((prev) => {
+            const next = !prev;
+            if (next) {
+                setAutoRotateOn(true);
+            }
+            return next;
+        });
+    }, []);
     const [interacting, setInteracting] = useState(false);
     const [resetKey, setResetKey] = useState(0);
     const [hint, setHint] = useState(true);
@@ -265,7 +289,8 @@ export default function RobotViewer() {
                         )}
 
                         <div className={`rv-statelabel${exploded ? " is-exploded" : ""}`}>
-                            {exploded ? "Disassembled view — components separated" : "Assembled view"}
+                            <span>{exploded ? "Disassembled view — components separated" : "Assembled view"}</span>
+                            {isAutoAnimating && <span className="rv-auto-badge">● Animated Tour</span>}
                         </div>
 
                         {hint && ready && (
@@ -276,7 +301,17 @@ export default function RobotViewer() {
                         )}
 
                         <div className="rv-controls">
-                            <button type="button" className="rv-btn rv-btn--primary" onClick={() => setExploded((v) => !v)}>
+                            <button
+                                type="button"
+                                className={`rv-btn${isAutoAnimating ? " is-on" : ""}`}
+                                onClick={toggleAutoAnimate}
+                                aria-pressed={isAutoAnimating}
+                                title={isAutoAnimating ? "Pause automated animation" : "Play cinematic assembly / disassembly animation"}
+                            >
+                                {isAutoAnimating ? <Pause size={15} /> : <Play size={15} />}
+                                {isAutoAnimating ? "Pause Animation" : "Animate"}
+                            </button>
+                            <button type="button" className="rv-btn rv-btn--primary" onClick={() => { setIsAutoAnimating(false); setExploded((v) => !v); }}>
                                 {exploded ? <BoxIcon size={16} /> : <Boxes size={16} />}
                                 {exploded ? "Reassemble" : "Disassemble"}
                             </button>

@@ -17,8 +17,6 @@ import "../styles/ControlPanel.css";
 
 export default function ControlPanel() {
 
-    const [mode, setMode] = useState("manual");
-
     const [running, setRunning] = useState(false);
 
     const [paused, setPaused] = useState(false);
@@ -259,33 +257,7 @@ export default function ControlPanel() {
 
             </div>
 
-            <div className="mode-selector">
-
-                <button
-
-                    className={`mode-btn ${mode === "manual" ? "active" : ""}`}
-
-                    onClick={() => setMode("manual")}
-
-                >
-
-                    🎮 Manual
-
-                </button>
-
-                <button
-
-                    className={`mode-btn ${mode === "auto" ? "active" : ""}`}
-
-                    onClick={() => setMode("auto")}
-
-                >
-
-                    🤖 Auto
-
-                </button>
-
-            </div>
+            
 
             <div className="control-grid">
 

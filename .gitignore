@@ -11,3 +11,4 @@ coverage/
 database.json
 users_db.json
 graphify-out/
+robot_configs.json

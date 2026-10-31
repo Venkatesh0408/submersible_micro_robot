@@ -59,7 +59,7 @@ const MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024; // 5 MB safety bound
  * SSRF guard: the ESP32-CAM is always a device on the local private network.
  * Only allow private RFC1918 LAN addresses, loopback, or *.local mDNS names.
  */
-export function validateCamUrl(raw: string): CamUrlValidation {
+export function validateCamUrl(raw: string, opts?: { allowLoopback?: boolean }): CamUrlValidation {
   let url: URL;
   try {
     url = new URL(raw);
@@ -69,11 +69,33 @@ export function validateCamUrl(raw: string): CamUrlValidation {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return { ok: false, reason: "Only http/https is allowed" };
   }
+  if (url.port) {
+    const portNum = Number(url.port);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      return { ok: false, reason: "Invalid port number" };
+    }
+  }
   const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+  if (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "0.0.0.0" ||
+    host.startsWith("127.")
+  ) {
+    if (opts?.allowLoopback || process.env.ALLOW_TEST_LOOPBACK === "true") {
+      return { ok: true, parsedUrl: url };
+    }
     return { ok: false, reason: "Loopback addresses are not permitted" };
   }
+  // Reject cloud metadata / link-local addresses
+  if (host === "169.254.169.254" || host.startsWith("169.254.")) {
+    return { ok: false, reason: "Cloud metadata and link-local addresses are not permitted" };
+  }
   if (host.endsWith(".local")) {
+    if (host.includes("localhost") || host.includes("127.") || host.includes("169.254.")) {
+      return { ok: false, reason: "Disallowed local name" };
+    }
     return { ok: true, parsedUrl: url };
   }
   const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -85,6 +107,9 @@ export function validateCamUrl(raw: string): CamUrlValidation {
   }
   const a = Number(m[1]);
   const b = Number(m[2]);
+  if (a >= 224) {
+    return { ok: false, reason: "Multicast and reserved addresses are not permitted" };
+  }
   const isPrivate =
     a === 10 ||
     (a === 192 && b === 168) ||
@@ -99,15 +124,99 @@ export function validateCamUrl(raw: string): CamUrlValidation {
 }
 
 /**
+ * Validate that a buffer represents a structurally valid JPEG image.
+ * A real JPEG starts with 0xFF, 0xD8 (SOI), ends with 0xFF, 0xD9 (EOI),
+ * and contains valid markers including a Start of Frame (SOF)
+ * with non-zero dimensions and a Start of Scan (SOS 0xFFDA).
+ */
+export function isValidJpeg(buffer: Buffer): boolean {
+  if (!buffer || buffer.length < 64) return false;
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) return false;
+  if (buffer[buffer.length - 2] !== 0xff || buffer[buffer.length - 1] !== 0xd9) return false;
+
+  let offset = 2;
+  let hasSof = false;
+  let hasSos = false;
+
+  while (offset < buffer.length - 1) {
+    if (buffer[offset] !== 0xff) {
+      offset++;
+      continue;
+    }
+
+    while (offset < buffer.length && buffer[offset] === 0xff) {
+      offset++;
+    }
+    if (offset >= buffer.length) break;
+
+    const marker = buffer[offset++];
+    if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+      if (marker === 0xd9) break;
+      continue;
+    }
+
+    if (marker === 0xda) {
+      hasSos = true;
+      break;
+    }
+
+    if (offset + 2 > buffer.length) break;
+    const length = buffer.readUInt16BE(offset);
+    if (length < 2 || offset + length > buffer.length) {
+      return false;
+    }
+
+    const isSof =
+      marker === 0xc0 ||
+      marker === 0xc1 ||
+      marker === 0xc2 ||
+      marker === 0xc3 ||
+      marker === 0xc5 ||
+      marker === 0xc6 ||
+      marker === 0xc7 ||
+      marker === 0xc9 ||
+      marker === 0xca ||
+      marker === 0xcb ||
+      marker === 0xcd ||
+      marker === 0xce ||
+      marker === 0xcf;
+
+    if (isSof) {
+      if (length >= 7) {
+        const height = buffer.readUInt16BE(offset + 3);
+        const width = buffer.readUInt16BE(offset + 5);
+        if (width > 0 && height > 0) {
+          hasSof = true;
+        }
+      }
+    }
+
+    offset += length;
+  }
+
+  return hasSof && hasSos;
+}
+
+/**
  * Extract the first complete JPEG image (SOI 0xFFD8 .. EOI 0xFFD9) from a buffer
  * that may be either a single JPEG or a multipart/x-mixed-replace MJPEG stream chunk sequence.
+ * Verifies that the candidate frame contains valid JPEG structure.
  */
 export function extractFirstJpegFrame(buffer: Buffer): Buffer | null {
-  const soiIdx = buffer.indexOf(JPEG_SOI);
-  if (soiIdx < 0) return null;
-  const eoiIdx = buffer.indexOf(JPEG_EOI, soiIdx + 2);
-  if (eoiIdx < 0) return null;
-  return buffer.subarray(soiIdx, eoiIdx + 2);
+  let searchStart = 0;
+  while (searchStart < buffer.length - 1) {
+    const soiIdx = buffer.indexOf(JPEG_SOI, searchStart);
+    if (soiIdx < 0) return null;
+    const eoiIdx = buffer.indexOf(JPEG_EOI, soiIdx + 2);
+    if (eoiIdx < 0) return null;
+
+    const candidate = buffer.subarray(soiIdx, eoiIdx + 2);
+    if (candidate.length >= 8 && candidate[0] === 0xff && candidate[1] === 0xd8 && candidate[candidate.length - 2] === 0xff && candidate[candidate.length - 1] === 0xd9) {
+      return candidate;
+    }
+    searchStart = soiIdx + 2;
+  }
+  return null;
 }
 
 export class Esp32CameraService {
@@ -422,16 +531,42 @@ export class Esp32CameraService {
           const contentType = res.headers["content-type"] || "video/mjpeg";
           res.destroy();
 
-          if (statusCode >= 200 && statusCode < 300) {
+          if (statusCode >= 300 && statusCode < 400) {
             finish({
-              online: true,
+              online: false,
               verifiedAtMs: Date.now(),
               targetUrl,
               statusCode,
               contentType,
               latencyMs,
-              message: `ESP32-CAM connected over WiFi (${latencyMs}ms)`,
+              message: "ESP32-CAM stream does not permit redirects.",
             });
+          } else if (statusCode >= 200 && statusCode < 300) {
+            const isExpectedType =
+              contentType.toLowerCase().includes("multipart") ||
+              contentType.toLowerCase().includes("image") ||
+              contentType.toLowerCase().includes("octet-stream");
+            if (!isExpectedType) {
+              finish({
+                online: false,
+                verifiedAtMs: Date.now(),
+                targetUrl,
+                statusCode,
+                contentType,
+                latencyMs,
+                message: `ESP32-CAM returned unexpected content type: ${contentType}`,
+              });
+            } else {
+              finish({
+                online: true,
+                verifiedAtMs: Date.now(),
+                targetUrl,
+                statusCode,
+                contentType,
+                latencyMs,
+                message: `ESP32-CAM connected over WiFi (${latencyMs}ms)`,
+              });
+            }
           } else {
             finish({
               online: false,
@@ -510,6 +645,14 @@ export class Esp32CameraService {
         { timeout: this.config.camera.pingTimeoutMs * 2 },
         (proxyRes) => {
           const statusCode = proxyRes.statusCode || 200;
+          if (statusCode >= 300 && statusCode < 400) {
+            proxyRes.destroy();
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(502, { "Content-Type": "text/plain" });
+              clientRes.end("ESP32-CAM stream does not permit redirects.");
+            }
+            return;
+          }
           if (statusCode < 200 || statusCode >= 300) {
             proxyRes.destroy();
             if (!clientRes.headersSent) {
@@ -723,6 +866,9 @@ export class Esp32CameraService {
         },
       };
     } catch (writeErr: any) {
+      if (fsLib.existsSync(targetPath)) {
+        try { fsLib.unlinkSync(targetPath); } catch {}
+      }
       return {
         success: false,
         simulated: false,

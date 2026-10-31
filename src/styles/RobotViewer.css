@@ -83,6 +83,22 @@
     transition: color 0.2s ease, border-color 0.2s ease;
 }
 .rv-statelabel.is-exploded { color: var(--primary); border-color: rgba(34, 211, 238, 0.4); }
+.rv-auto-badge {
+    margin-left: 8px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(34, 211, 238, 0.2);
+    color: var(--primary);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    animation: rv-pulse 1.8s infinite;
+}
+@keyframes rv-pulse {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
+}
 
 /* ---- one-time hint chip (top-right) ---- */
 .rv-hint {

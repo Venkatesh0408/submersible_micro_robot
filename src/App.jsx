@@ -62,6 +62,8 @@ function AnimatedRoutes() {
           <Route path="/welcome" element={<Welcome />} />
           <Route path="/login" element={<Login />} />
           <Route path="/model" element={<ModelViewerPage />} />
+          <Route path="/assembly" element={<Navigate to="/model" replace />} />
+          <Route path="/3d" element={<Navigate to="/model" replace />} />
 
           {/* Protected Routes */}
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />

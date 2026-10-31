@@ -4,13 +4,24 @@ import pkg from "pg";
 
 const { Pool } = pkg;
 
-// Inspection history store. Uses Neon Postgres when DATABASE_URL is set,
-// otherwise falls back to a local JSON file so the app still runs offline.
-// The public API (getHistory / saveHistoryItem / deleteHistoryItem) is unchanged.
+export interface RobotConfig {
+  userId: string;
+  robotName: string;
+  cameraIp: string;
+  streamPort: number;
+  capturePort: number;
+  streamPath: string;
+  capturePath: string;
+  connectionMode: "LOCAL_GATEWAY" | "CLOUD_REMOTE";
+  lastVerifiedAt: string | null;
+  updatedAt: string;
+}
 
+// Inspection history & robot configuration store. Uses Neon Postgres when DATABASE_URL is set,
+// otherwise falls back to local JSON files so the app still runs offline.
 const DB_PATH = path.join(process.cwd(), "database.json");
-// Accept a few common names for the Postgres URL so a mislabeled host env var
-// (e.g. "neon_db"/"neno_db") still connects instead of silently falling back to JSON.
+const CONFIG_PATH = path.join(process.cwd(), "robot_configs.json");
+
 const CONNECTION =
     process.env.DATABASE_URL ||
     process.env.NEON_DATABASE_URL ||
@@ -23,7 +34,6 @@ let ready: Promise<void> | null = null;
 if (CONNECTION) {
     pool = new Pool({
         connectionString: CONNECTION,
-        // Neon serves publicly-trusted (Let's Encrypt) certs — verify them.
         ssl: { rejectUnauthorized: true },
         max: 5,
         idleTimeoutMillis: 30000,
@@ -35,10 +45,22 @@ if (CONNECTION) {
                 id TEXT PRIMARY KEY,
                 data JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
+            );
+            CREATE TABLE IF NOT EXISTS robot_configurations (
+                user_id TEXT PRIMARY KEY,
+                robot_name TEXT NOT NULL DEFAULT 'VSTY Submersible Micro Robot',
+                camera_ip TEXT NOT NULL DEFAULT '',
+                stream_port INTEGER NOT NULL DEFAULT 81,
+                capture_port INTEGER NOT NULL DEFAULT 80,
+                stream_path TEXT NOT NULL DEFAULT '/stream',
+                capture_path TEXT NOT NULL DEFAULT '/capture',
+                connection_mode TEXT NOT NULL DEFAULT 'LOCAL_GATEWAY',
+                last_verified_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
         `)
         .then(() => {
-            console.log("[db] Connected to Neon Postgres (analysis_history ready)");
+            console.log("[db] Connected to Neon Postgres (analysis_history & robot_configurations ready)");
         })
         .catch((e: unknown) => {
             console.error("[db] Postgres init failed, falling back to file store:", (e as Error).message);
@@ -46,7 +68,7 @@ if (CONNECTION) {
         });
 }
 
-// ---- local file fallback ----
+// ---- local file fallback for analysis history ----
 function initFile() {
     if (!fsLib.existsSync(DB_PATH)) fsLib.writeFileSync(DB_PATH, "[]");
 }
@@ -61,6 +83,27 @@ function fileGet(): any[] {
 function fileWrite(h: any[]) {
     fsLib.writeFileSync(DB_PATH, JSON.stringify(h, null, 2));
 }
+
+// ---- local file fallback for robot configurations ----
+function initConfigFile() {
+    if (!fsLib.existsSync(CONFIG_PATH)) fsLib.writeFileSync(CONFIG_PATH, "{}");
+}
+function fileGetConfigs(): Record<string, RobotConfig> {
+    initConfigFile();
+    try {
+        const data = JSON.parse(fsLib.readFileSync(CONFIG_PATH, "utf8"));
+        return typeof data === "object" && data !== null ? data : {};
+    } catch {
+        return {};
+    }
+}
+function fileWriteConfigs(configs: Record<string, RobotConfig>) {
+    fsLib.writeFileSync(CONFIG_PATH, JSON.stringify(configs, null, 2));
+}
+
+// ==========================================================
+// ANALYSIS HISTORY API
+// ==========================================================
 
 export async function getHistory() {
     if (ready) await ready;
@@ -121,4 +164,130 @@ export async function deleteHistoryItem(id: string) {
         return true;
     }
     return false;
+}
+
+// ==========================================================
+// ROBOT & CAMERA CONFIGURATION API
+// ==========================================================
+
+export async function getRobotConfig(userId: string | number): Promise<RobotConfig | null> {
+    const uid = String(userId);
+    if (ready) await ready;
+    if (pool) {
+        try {
+            const res = await pool.query(
+                `SELECT user_id, robot_name, camera_ip, stream_port, capture_port,
+                        stream_path, capture_path, connection_mode, last_verified_at, updated_at
+                 FROM robot_configurations
+                 WHERE user_id = $1`,
+                [uid]
+            );
+            if (res.rows.length === 0) return null;
+            const row = res.rows[0];
+            return {
+                userId: row.user_id,
+                robotName: row.robot_name,
+                cameraIp: row.camera_ip,
+                streamPort: Number(row.stream_port),
+                capturePort: Number(row.capture_port),
+                streamPath: row.stream_path,
+                capturePath: row.capture_path,
+                connectionMode: row.connection_mode as "LOCAL_GATEWAY" | "CLOUD_REMOTE",
+                lastVerifiedAt: row.last_verified_at ? new Date(row.last_verified_at).toISOString() : null,
+                updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+            };
+        } catch (err: any) {
+            console.error("[db] getRobotConfig postgres error:", err.message);
+            return null;
+        }
+    }
+
+    const configs = fileGetConfigs();
+    return configs[uid] ?? null;
+}
+
+export async function saveRobotConfig(config: RobotConfig): Promise<boolean> {
+    const uid = String(config.userId);
+    if (ready) await ready;
+    if (pool) {
+        try {
+            await pool.query(
+                `INSERT INTO robot_configurations (
+                    user_id, robot_name, camera_ip, stream_port, capture_port,
+                    stream_path, capture_path, connection_mode, last_verified_at, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                 ON CONFLICT (user_id) DO UPDATE SET
+                    robot_name = EXCLUDED.robot_name,
+                    camera_ip = EXCLUDED.camera_ip,
+                    stream_port = EXCLUDED.stream_port,
+                    capture_port = EXCLUDED.capture_port,
+                    stream_path = EXCLUDED.stream_path,
+                    capture_path = EXCLUDED.capture_path,
+                    connection_mode = EXCLUDED.connection_mode,
+                    last_verified_at = COALESCE(EXCLUDED.last_verified_at, robot_configurations.last_verified_at),
+                    updated_at = now()`,
+                [
+                    uid,
+                    config.robotName || "VSTY Submersible Micro Robot",
+                    config.cameraIp || "",
+                    config.streamPort || 81,
+                    config.capturePort || 80,
+                    config.streamPath || "/stream",
+                    config.capturePath || "/capture",
+                    config.connectionMode || "LOCAL_GATEWAY",
+                    config.lastVerifiedAt ? new Date(config.lastVerifiedAt) : null,
+                ]
+            );
+            return true;
+        } catch (err: any) {
+            console.error("[db] saveRobotConfig postgres error:", err.message);
+            return false;
+        }
+    }
+
+    try {
+        const configs = fileGetConfigs();
+        configs[uid] = {
+            ...config,
+            userId: uid,
+            updatedAt: new Date().toISOString(),
+        };
+        fileWriteConfigs(configs);
+        return true;
+    } catch (err) {
+        console.error("[db] saveRobotConfig file error:", err);
+        return false;
+    }
+}
+
+export async function updateLastVerified(userId: string | number, timestamp = new Date().toISOString()): Promise<boolean> {
+    const uid = String(userId);
+    if (ready) await ready;
+    if (pool) {
+        try {
+            await pool.query(
+                `UPDATE robot_configurations
+                 SET last_verified_at = $1, updated_at = now()
+                 WHERE user_id = $2`,
+                [new Date(timestamp), uid]
+            );
+            return true;
+        } catch (err: any) {
+            console.error("[db] updateLastVerified error:", err.message);
+            return false;
+        }
+    }
+
+    try {
+        const configs = fileGetConfigs();
+        if (configs[uid]) {
+            configs[uid].lastVerifiedAt = timestamp;
+            configs[uid].updatedAt = timestamp;
+            fileWriteConfigs(configs);
+            return true;
+        }
+        return false;
+    } catch {
+        return false;
+    }
 }

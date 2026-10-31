@@ -79,6 +79,30 @@ export default function Dashboard() {
                 {/* MISSION REPORT COMPACT CARD */}
                 <MissionReportColumn />
 
+                {/* VIEW 3D MODEL CARD */}
+                <div
+                    className="system-card"
+                    style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+                    onClick={() => navigate("/model")}
+                >
+                    <div className="system-icon">
+                        📦
+                    </div>
+                    <h2>
+                        View 3D Model
+                    </h2>
+                    <p>
+                        Interactive 3D model of our hardware. Inspect assembled and exploded views with cinematic animation.
+                    </p>
+                    <div className="system-info">
+                        <span>Format : GLB</span>
+                        <span>Interactive : 3D</span>
+                    </div>
+                    <button style={{ marginTop: 'auto' }}>
+                        VIEW 3D MODEL →
+                    </button>
+                </div>
+
                 {/* GPS CARD */}
                 <div
                     className="system-card"

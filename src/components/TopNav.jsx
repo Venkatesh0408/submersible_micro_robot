@@ -32,6 +32,7 @@ export default function TopNav({ onAbout }) {
         <>
             <button className="topnav__link" onClick={() => go("/home")}>Home</button>
             <button className="topnav__link" onClick={handleAbout}>About Us</button>
+            <button className="topnav__link" onClick={() => go("/assembly")}>3D Assembly</button>
             {authed && <button className="topnav__link" onClick={() => go("/dashboard")}>Dashboard</button>}
         </>
     );

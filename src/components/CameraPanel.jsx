@@ -1,11 +1,12 @@
 import { useEffect, useState, useRef } from "react";
 import { useMission } from "../context/MissionContext";
 import {
-  WifiOff, Camera, Video, CheckCircle, Loader2, X,
-  Maximize2, Minimize2, ZoomIn, Eye, Crosshair, Download
+  WifiOff, Wifi, Camera, Video, CheckCircle, AlertTriangle, AlertCircle, Clock,
+  Loader2, X, Maximize2, Minimize2, ZoomIn, Eye, Crosshair, Download, Settings, Save, RefreshCw
 } from "lucide-react";
 import {
-  fetchMedia, captureEspSnapshot, getCameraStatus
+  fetchMedia, captureEspSnapshot, getCameraStatus,
+  getRobotConfig, saveRobotConfig, testCameraConnection
 } from "../services/api";
 import "../styles/Camera.css";
 
@@ -35,7 +36,21 @@ export default function CameraPanel() {
   const [fps] = useState(30);
   const [resolution] = useState("VGA / SVGA");
 
-  // Camera connection state managed authoritatively by backend
+  // Camera connection & configuration states
+  const [cameraIp, setCameraIp] = useState("");
+  const [streamPort, setStreamPort] = useState(81);
+  const [capturePort, setCapturePort] = useState(80);
+  const [streamPath, setStreamPath] = useState("/stream");
+  const [capturePath, setCapturePath] = useState("/capture");
+  const [connectionMode, setConnectionMode] = useState("LOCAL_GATEWAY");
+  const [showConfigDrawer, setShowConfigDrawer] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [connectionState, setConnectionState] = useState("Disconnected"); // "Connected" | "Connecting" | "Disconnected" | "Invalid IP" | "Connection timeout"
+  const [connectionMessage, setConnectionMessage] = useState("");
+  const [streamKey, setStreamKey] = useState(0);
+
+  // Viewport states
   const [espConnected, setEspConnected] = useState(false);
   const [espLatency, setEspLatency] = useState(null);
   const [capturingSnapshot, setCapturingSnapshot] = useState(false);
@@ -55,18 +70,52 @@ export default function CameraPanel() {
   const canvasRef = useRef(null);
   const viewportRef = useRef(null);
 
-  // Authoritative same-origin stream endpoint provided by backend
+  // Same-origin stream endpoint proxied by backend
   const streamUrl = "/api/camera/stream";
 
-  // Background camera status sync with backend
+  // 1. Load user's saved robot & camera configuration from database on mount
+  useEffect(() => {
+    let isMounted = true;
+    const loadSavedConfig = async () => {
+      try {
+        const res = await getRobotConfig();
+        if (isMounted && res?.success && res?.config) {
+          const cfg = res.config;
+          if (cfg.cameraIp) setCameraIp(cfg.cameraIp);
+          if (cfg.streamPort) setStreamPort(cfg.streamPort);
+          if (cfg.capturePort) setCapturePort(cfg.capturePort);
+          if (cfg.streamPath) setStreamPath(cfg.streamPath);
+          if (cfg.capturePath) setCapturePath(cfg.capturePath);
+          if (cfg.connectionMode) setConnectionMode(cfg.connectionMode);
+
+          if (cfg.isVerified && cfg.cameraIp) {
+            setConnectionState("Connected");
+            setEspConnected(true);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load saved robot config:", err);
+      }
+    };
+
+    loadSavedConfig();
+    return () => { isMounted = false; };
+  }, []);
+
+  // 2. Background camera status sync with backend
   useEffect(() => {
     let isMounted = true;
     const syncStatus = async () => {
       try {
         const res = await getCameraStatus(true);
         if (isMounted && res?.status) {
-          setEspConnected(Boolean(res.status.online));
+          const isOnline = Boolean(res.status.online);
+          setEspConnected(isOnline);
           setEspLatency(res.status.latencyMs ?? null);
+          if (isOnline) {
+            setConnectionState("Connected");
+            setConnectionMessage(res.status.message || "ESP32-CAM stream is reachable.");
+          }
         }
       } catch (err) {
         if (isMounted) {
@@ -76,10 +125,7 @@ export default function CameraPanel() {
       }
     };
 
-    // Initial check
     syncStatus();
-
-    // Auto-poll camera status every 5 seconds so live feed automatically connects when powered
     const timer = setInterval(syncStatus, 5000);
     return () => {
       isMounted = false;
@@ -87,7 +133,7 @@ export default function CameraPanel() {
     };
   }, []);
 
-  // Re-show the offline notice whenever connection state flips
+  // Re-show offline notice whenever connection state flips
   useEffect(() => { setEspNoticeDismissed(false); }, [espConnected]);
 
   // Load saved snapshots & media from backend
@@ -106,6 +152,74 @@ export default function CameraPanel() {
   useEffect(() => {
     loadRecentMedia();
   }, []);
+
+  // Save camera configuration permanently in database for authenticated user
+  const handleSaveConfig = async () => {
+    setIsSavingConfig(true);
+    setStatusNotice("Saving camera configuration to database...");
+    try {
+      const res = await saveRobotConfig({
+        cameraIp,
+        streamPort: Number(streamPort) || 81,
+        capturePort: Number(capturePort) || 80,
+        streamPath: streamPath || "/stream",
+        capturePath: capturePath || "/capture",
+        connectionMode,
+      });
+
+      if (res?.success) {
+        setStatusNotice("Camera configuration saved permanently!");
+        setConnectionMessage(cameraIp ? `Target saved: ${cameraIp}:${streamPort}` : "Saved (No IP configured)");
+        setTimeout(() => setStatusNotice(""), 4000);
+      } else {
+        setStatusNotice(res?.message || "Failed to save configuration.");
+        if (res?.status) setConnectionState(res.status);
+      }
+    } catch (err) {
+      setStatusNotice("Save error: " + (err?.message || "network failure"));
+    } finally {
+      setIsSavingConfig(false);
+    }
+  };
+
+  // Test live connection to ESP32-CAM: validates response, checks latency, and verifies JPEG frames
+  const handleTestConnection = async () => {
+    setIsTestingConnection(true);
+    setConnectionState("Connecting");
+    setConnectionMessage("Probing ESP32-CAM stream and validating JPEG frames...");
+
+    try {
+      const res = await testCameraConnection({
+        cameraIp,
+        streamPort: Number(streamPort) || 81,
+        capturePort: Number(capturePort) || 80,
+        streamPath: streamPath || "/stream",
+        capturePath: capturePath || "/capture",
+      });
+
+      if (res?.success && res?.status === "Connected") {
+        setConnectionState("Connected");
+        setEspConnected(true);
+        setEspLatency(res.latencyMs ?? null);
+        setConnectionMessage(res.message || "ESP32-CAM verified successfully. Valid JPEG stream received.");
+        setStatusNotice("Connection verified! Live feed active.");
+        setStreamKey(k => k + 1);
+        setTimeout(() => setStatusNotice(""), 4000);
+      } else {
+        const state = res?.status || "Disconnected";
+        setConnectionState(state);
+        setEspConnected(false);
+        setEspLatency(null);
+        setConnectionMessage(res?.message || "Unable to reach camera at specified address.");
+      }
+    } catch (err) {
+      setConnectionState("Disconnected");
+      setEspConnected(false);
+      setConnectionMessage("Test failed: " + (err?.message || "Network error"));
+    } finally {
+      setIsTestingConnection(false);
+    }
+  };
 
   // Interactive Live Snapshot Capture with Shutter Flash
   const handleCaptureSnapshot = async () => {
@@ -286,6 +400,49 @@ export default function CameraPanel() {
     setRadarTarget({ x, y, range: rangeM, bearing: bearingDeg });
   };
 
+  // Helper badge color & icon for the 5 connection states
+  const getStatusBadge = () => {
+    switch (connectionState) {
+      case "Connected":
+        return {
+          bg: "#15803d",
+          color: "#ffffff",
+          icon: <CheckCircle size={14} className="text-white" />,
+          label: "Connected",
+        };
+      case "Connecting":
+        return {
+          bg: "#b45309",
+          color: "#ffffff",
+          icon: <Loader2 size={14} className="animate-spin text-white" />,
+          label: "Connecting...",
+        };
+      case "Connection timeout":
+        return {
+          bg: "#c2410c",
+          color: "#ffffff",
+          icon: <Clock size={14} className="text-white" />,
+          label: "Connection timeout",
+        };
+      case "Invalid IP":
+        return {
+          bg: "#b91c1c",
+          color: "#ffffff",
+          icon: <AlertCircle size={14} className="text-white" />,
+          label: "Invalid IP",
+        };
+      default:
+        return {
+          bg: "#334155",
+          color: "#cbd5e1",
+          icon: <WifiOff size={14} className="text-slate-300" />,
+          label: "Disconnected",
+        };
+    }
+  };
+
+  const statusBadge = getStatusBadge();
+
   return (
     <div className="map-card camera-card" style={{
       background: "#0e1524",
@@ -367,6 +524,254 @@ export default function CameraPanel() {
         </div>
       </div>
 
+      {/* ========================================================== */}
+      {/* DYNAMIC ESP32-CAM HARDWARE CONFIGURATION & CONNECTION PANEL */}
+      {/* ========================================================== */}
+      <div style={{
+        background: "rgba(11, 20, 36, 0.9)",
+        border: "1px solid rgba(34, 211, 238, 0.3)",
+        borderRadius: "14px",
+        padding: "14px 16px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "10px",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)"
+      }}>
+        {/* Main IP Config Bar */}
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "10px",
+          flexWrap: "wrap",
+          justifyContent: "space-between"
+        }}>
+          {/* IP Input with icon */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 2, minWidth: "240px" }}>
+            <span style={{ fontSize: "12px", color: "#93a1bc", fontWeight: 700, whiteSpace: "nowrap" }}>
+              CAM IP:
+            </span>
+            <input
+              type="text"
+              placeholder="e.g. 192.168.1.184, 10.41.235.60"
+              value={cameraIp}
+              onChange={(e) => setCameraIp(e.target.value)}
+              style={{
+                flex: 1,
+                padding: "8px 12px",
+                borderRadius: "8px",
+                border: "1px solid rgba(34, 211, 238, 0.4)",
+                background: "#16203a",
+                color: "#22d3ee",
+                fontFamily: "monospace",
+                fontSize: "13px",
+                fontWeight: 600,
+                outline: "none"
+              }}
+            />
+          </div>
+
+          {/* Connection Status Badge (5 states) */}
+          <div style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            padding: "6px 12px",
+            borderRadius: "999px",
+            background: statusBadge.bg,
+            color: statusBadge.color,
+            fontSize: "11.5px",
+            fontWeight: 700,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.3)"
+          }}>
+            {statusBadge.icon}
+            <span>{statusBadge.label}</span>
+          </div>
+
+          {/* Action Buttons: Test, Save, Advanced */}
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              onClick={handleTestConnection}
+              disabled={isTestingConnection}
+              title="Verify camera stream, check reachability, and validate JPEG frames"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 14px",
+                borderRadius: "8px",
+                border: "1px solid #22d3ee",
+                background: "linear-gradient(135deg, rgba(34,211,238,0.25), rgba(14,116,144,0.4))",
+                color: "#22d3ee",
+                fontWeight: 700,
+                fontSize: "12px",
+                cursor: isTestingConnection ? "not-allowed" : "pointer",
+                transition: "all 0.2s ease"
+              }}
+            >
+              {isTestingConnection ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+              Test Connection
+            </button>
+
+            <button
+              onClick={handleSaveConfig}
+              disabled={isSavingConfig}
+              title="Save camera configuration permanently in database for this operator"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 14px",
+                borderRadius: "8px",
+                border: "1px solid rgba(34,197,94,0.6)",
+                background: "linear-gradient(135deg, rgba(34,197,94,0.2), rgba(21,128,61,0.4))",
+                color: "#4ade80",
+                fontWeight: 700,
+                fontSize: "12px",
+                cursor: isSavingConfig ? "not-allowed" : "pointer",
+                transition: "all 0.2s ease"
+              }}
+            >
+              {isSavingConfig ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              Save Config
+            </button>
+
+            <button
+              onClick={() => setShowConfigDrawer(!showConfigDrawer)}
+              title="Configure ports, paths, and connection mode"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px",
+                padding: "8px 10px",
+                borderRadius: "8px",
+                border: "1px solid rgba(255,255,255,0.15)",
+                background: showConfigDrawer ? "rgba(34,211,238,0.2)" : "rgba(22,32,58,0.6)",
+                color: showConfigDrawer ? "#22d3ee" : "#93a1bc",
+                fontWeight: 600,
+                fontSize: "12px",
+                cursor: "pointer"
+              }}
+            >
+              <Settings size={14} />
+            </button>
+          </div>
+        </div>
+
+        {/* Diagnostic Message / Error Banner */}
+        {connectionMessage && (
+          <div style={{
+            fontSize: "11.5px",
+            color: connectionState === "Connected" ? "#4ade80" : "#fca5a5",
+            background: connectionState === "Connected" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
+            border: `1px solid ${connectionState === "Connected" ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
+            borderRadius: "6px",
+            padding: "6px 10px",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px"
+          }}>
+            {connectionState === "Connected" ? <CheckCircle size={13} /> : <AlertTriangle size={13} />}
+            <span>{connectionMessage}</span>
+          </div>
+        )}
+
+        {/* Expandable Advanced Settings (Ports, Paths & Mode) */}
+        {showConfigDrawer && (
+          <div style={{
+            borderTop: "1px solid rgba(34, 211, 238, 0.15)",
+            paddingTop: "10px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px"
+          }}>
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+              gap: "8px"
+            }}>
+              <div>
+                <label style={{ fontSize: "10.5px", color: "#93a1bc", fontWeight: 600, display: "block", marginBottom: "3px" }}>
+                  STREAM PORT:
+                </label>
+                <input
+                  type="number"
+                  value={streamPort}
+                  onChange={(e) => setStreamPort(Number(e.target.value) || 81)}
+                  style={{ width: "100%", padding: "6px 8px", borderRadius: "6px", border: "1px solid #1e293b", background: "#16203a", color: "white", fontSize: "12px", outline: "none" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "10.5px", color: "#93a1bc", fontWeight: 600, display: "block", marginBottom: "3px" }}>
+                  STREAM PATH:
+                </label>
+                <input
+                  type="text"
+                  value={streamPath}
+                  onChange={(e) => setStreamPath(e.target.value)}
+                  style={{ width: "100%", padding: "6px 8px", borderRadius: "6px", border: "1px solid #1e293b", background: "#16203a", color: "white", fontSize: "12px", outline: "none" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "10.5px", color: "#93a1bc", fontWeight: 600, display: "block", marginBottom: "3px" }}>
+                  CAPTURE PORT:
+                </label>
+                <input
+                  type="number"
+                  value={capturePort}
+                  onChange={(e) => setCapturePort(Number(e.target.value) || 80)}
+                  style={{ width: "100%", padding: "6px 8px", borderRadius: "6px", border: "1px solid #1e293b", background: "#16203a", color: "white", fontSize: "12px", outline: "none" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "10.5px", color: "#93a1bc", fontWeight: 600, display: "block", marginBottom: "3px" }}>
+                  CAPTURE PATH:
+                </label>
+                <input
+                  type="text"
+                  value={capturePath}
+                  onChange={(e) => setCapturePath(e.target.value)}
+                  style={{ width: "100%", padding: "6px 8px", borderRadius: "6px", border: "1px solid #1e293b", background: "#16203a", color: "white", fontSize: "12px", outline: "none" }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: "10.5px", color: "#93a1bc", fontWeight: 600, display: "block", marginBottom: "3px" }}>
+                  CONNECTION MODE:
+                </label>
+                <select
+                  value={connectionMode}
+                  onChange={(e) => setConnectionMode(e.target.value)}
+                  style={{ width: "100%", padding: "6px 8px", borderRadius: "6px", border: "1px solid #1e293b", background: "#16203a", color: "#22d3ee", fontSize: "12px", outline: "none" }}
+                >
+                  <option value="LOCAL_GATEWAY">Local Gateway (Bench/LAN)</option>
+                  <option value="CLOUD_REMOTE">Cloud Remote (Render)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Generated URLs Dynamic Preview */}
+            <div style={{
+              fontSize: "11px",
+              fontFamily: "monospace",
+              color: "#94a3b8",
+              background: "#070d18",
+              padding: "6px 10px",
+              borderRadius: "6px",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "12px"
+            }}>
+              <span>Live Stream: <b style={{ color: "#38bdf8" }}>{cameraIp ? `http://${cameraIp}:${streamPort}${streamPath}` : "Not configured"}</b></span>
+              <span>Snapshot: <b style={{ color: "#38bdf8" }}>{cameraIp ? `http://${cameraIp}:${capturePort}${capturePath}` : "Not configured"}</b></span>
+              <span>Proxy Endpoint: <b style={{ color: "#34d399" }}>/api/camera/stream</b></span>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Main Interactive Video Viewport */}
       <div
         ref={viewportRef}
@@ -404,11 +809,13 @@ export default function CameraPanel() {
         >
           {espConnected ? (
             <img
-              src={streamUrl}
+              key={streamKey}
+              src={`${streamUrl}?k=${streamKey}`}
               alt="ESP32-CAM Live Camera Stream"
               onError={() => {
                 setEspConnected(false);
                 setEspLatency(null);
+                setConnectionState("Disconnected");
               }}
               style={{
                 width: "100%",
@@ -548,7 +955,7 @@ export default function CameraPanel() {
                 CAMERA OFFLINE — RETRYING CONNECTION
               </div>
               <div style={{ color: "#8296a8", fontSize: "10px", marginTop: "1px" }}>
-                Hover cursor over radar for coordinate targeting | Live feed starts automatically when camera is powered
+                Enter camera IP above and click Test Connection | Live feed connects when hardware responds
               </div>
             </div>
             <button

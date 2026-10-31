@@ -10,7 +10,9 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:hardware": "tsx hardware/hardware.test.ts",
-    "test:auth": "tsx auth.test.ts"
+    "test:auth": "tsx auth.test.ts",
+    "test:camera": "tsx hardware/camera.test.ts",
+    "test:config": "tsx robot_config.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

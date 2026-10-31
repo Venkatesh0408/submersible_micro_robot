@@ -11,13 +11,13 @@ import rateLimit from "express-rate-limit";
 import xss from "xss";
 import { z } from "zod";
 import { logger } from "./logger.js";
-import { getHistory, saveHistoryItem, deleteHistoryItem } from "./database.js";
+import { getHistory, saveHistoryItem, deleteHistoryItem, getRobotConfig, saveRobotConfig, updateLastVerified, RobotConfig } from "./database.js";
 import jwt from "jsonwebtoken";
 import argon2 from "argon2";
 import cookieParser from "cookie-parser";
 import { AuthError, getAuthStore } from "./authStore.js";
 import { HardwareAdapter } from "./hardware/hardwareAdapter.js";
-import { validateCamUrl } from "./hardware/cameraService.js";
+import { validateCamUrl, isValidJpeg, extractFirstJpegFrame } from "./hardware/cameraService.js";
 
 dotenv.config();
 
@@ -93,8 +93,95 @@ function notifyClients(message) {
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-app.use(express.json({ limit: "500mb" }));
-app.use(express.urlencoded({ extended: true, limit: "500mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(cookieParser());
+
+// ==========================================================
+// AUTHENTICATION & AUTHORIZATION CONFIGURATION
+// ==========================================================
+export const JWT_CONFIGURED = Boolean(process.env.JWT_SECRET);
+export const JWT_SECRET = process.env.JWT_SECRET || "dev-only-insecure-secret-change-me";
+if (!JWT_CONFIGURED) {
+    const msg = "JWT_SECRET is not set — using an insecure development default.";
+    if (process.env.NODE_ENV === "production") logger.error(msg + " Legacy password login is disabled until it is set.");
+    else logger.warn(msg);
+}
+
+export interface AuthenticatedUser {
+  id: string | number;
+  username: string;
+  phone?: string | null;
+  role: "admin" | "operator" | string;
+}
+
+export interface AuthenticatedRequest extends express.Request {
+  user?: AuthenticatedUser;
+}
+
+/**
+ * Validates JWT session from Authorization header or HttpOnly cookie.
+ */
+export function authenticateToken(
+  req: AuthenticatedRequest,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const authHeader = req.headers["authorization"];
+  const headerToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+  const cookieToken = req.cookies?.token;
+  const token = headerToken || cookieToken;
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: "Authentication required" });
+  }
+
+  // Reject guest placeholder tokens on protected endpoints
+  if (typeof token === "string" && token.startsWith("guest-")) {
+    return res.status(401).json({ success: false, message: "Authentication required" });
+  }
+
+  // Basic CSRF check for state-changing cookie requests
+  if (!headerToken && cookieToken && ["POST", "PUT", "DELETE", "PATCH"].includes(req.method)) {
+    const origin = req.headers["origin"] || req.headers["referer"];
+    const host = req.headers["host"];
+    if (origin && host) {
+      try {
+        const originUrl = new URL(String(origin));
+        if (originUrl.host !== host) {
+          return res.status(403).json({ success: false, message: "Cross-site request blocked" });
+        }
+      } catch {
+        return res.status(403).json({ success: false, message: "Cross-site request blocked" });
+      }
+    }
+  }
+
+  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+    if (err) {
+      return res.status(401).json({ success: false, message: "Invalid or expired token" });
+    }
+    req.user = decoded;
+    next();
+  });
+}
+
+/**
+ * Enforces role-based authorization.
+ */
+export function requireRole(allowedRoles: string[]) {
+  return (req: AuthenticatedRequest, res: express.Response, next: express.NextFunction) => {
+    authenticateToken(req, res, () => {
+      if (!req.user || !allowedRoles.includes(req.user.role)) {
+        return res.status(403).json({ success: false, message: "Forbidden: Insufficient privileges" });
+      }
+      next();
+    });
+  };
+}
+
+export const requireOperatorOrAdmin = requireRole(["operator", "admin"]);
+export const requireAdmin = requireRole(["admin"]);
 
 const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000");
 const maxRequests = 10000; // Hardcoded to prevent interval fetch drops
@@ -414,7 +501,7 @@ app.get("/api/gps", (req, res) => {
   });
 });
 
-app.post("/api/gps", (req, res) => {
+app.post("/api/gps", requireOperatorOrAdmin, (req, res) => {
   const { latitude, longitude } = req.body;
   if (typeof latitude === "number" && typeof longitude === "number" && !isNaN(latitude) && !isNaN(longitude)) {
     HOME_LATITUDE = latitude;
@@ -435,7 +522,7 @@ const waypointSchema = z.object({
   ).min(1)
 });
 
-app.post("/api/waypoints", (req, res) => {
+app.post("/api/waypoints", requireOperatorOrAdmin, (req, res) => {
   const result = waypointSchema.safeParse(req.body);
   if (!result.success) {
     logger.warn(`Invalid waypoints payload from IP: ${req.ip}`);
@@ -838,7 +925,7 @@ app.get("/api/media", (req, res) => {
   }
 });
 
-app.post("/api/media/upload", (req, res) => {
+app.post("/api/media/upload", requireOperatorOrAdmin, (req, res) => {
   try {
     const { name, fileData } = req.body || {};
     if (!name || !fileData) {
@@ -879,7 +966,7 @@ app.post("/api/media/upload", (req, res) => {
   }
 });
 
-app.post("/api/media/upload-chunk", (req, res) => {
+app.post("/api/media/upload-chunk", requireOperatorOrAdmin, (req, res) => {
   try {
     const { name, chunk, index, total } = req.body || {};
     if (!name || chunk === undefined) {
@@ -923,7 +1010,7 @@ app.post("/api/media/upload-chunk", (req, res) => {
   }
 });
 
-app.delete("/api/media/:filename", (req, res) => {
+app.delete("/api/media/:filename", requireOperatorOrAdmin, (req, res) => {
   try {
     const filename = path.basename(req.params.filename);
     const targetPath = path.join(mediaDir, filename);
@@ -1020,7 +1107,7 @@ app.get("/api/camera/config", (_req, res) => {
   });
 });
 
-app.post("/api/camera/config", (req, res) => {
+app.post("/api/camera/config", requireAdmin, (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({
       success: false,
@@ -1085,6 +1172,418 @@ app.get("/api/camera/status", async (req, res) => {
 });
 
 // ==========================================================
+// PERSISTENT USER ROBOT & DYNAMIC CAMERA CONFIGURATION API
+// ==========================================================
+
+async function testEspCamConnection(opts: {
+  cameraIp: string;
+  streamPort: number;
+  capturePort: number;
+  streamPath: string;
+  capturePath: string;
+}): Promise<{
+  success: boolean;
+  status: "Connected" | "Disconnected" | "Invalid IP" | "Connection timeout";
+  statusCode?: number;
+  contentType?: string;
+  latencyMs?: number;
+  message: string;
+  isVerified?: boolean;
+}> {
+  const { cameraIp, streamPort, capturePort, streamPath, capturePath } = opts;
+  const ip = typeof cameraIp === "string" ? cameraIp.trim() : "";
+  if (!ip) {
+    return {
+      success: false,
+      status: "Invalid IP",
+      message: "Please enter a valid ESP32-CAM IP address.",
+    };
+  }
+
+  const streamTestUrl = `http://${ip}:${streamPort}${streamPath}`;
+  const guard = validateCamUrl(streamTestUrl);
+  if (!guard.ok) {
+    return {
+      success: false,
+      status: "Invalid IP",
+      message: guard.reason || "Invalid camera IP address.",
+    };
+  }
+
+  // Cloud deployment check: Render cloud cannot connect to RFC1918 private LAN IP
+  if (hardwareAdapter.config.isCloudEnvironment || process.env.RENDER || process.env.VERCEL) {
+    return {
+      success: false,
+      status: "Disconnected",
+      message:
+        "Render cloud servers cannot establish direct TCP connections to private LAN IP addresses (192.168.x.x / 10.x.x.x). For live video and real hardware control, run the Mission Control gateway locally on your laptop connected to the robot Wi-Fi hotspot.",
+    };
+  }
+
+  const captureTestUrl = `http://${ip}:${capturePort}${capturePath}`;
+  const startTime = Date.now();
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = (result: any) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(result);
+      }
+    };
+
+    const parsedUrl = new URL(captureTestUrl);
+    const req = http.get(
+      {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || 80,
+        path: parsedUrl.pathname + parsedUrl.search,
+        timeout: 3500,
+        headers: { Accept: "image/jpeg, multipart/x-mixed-replace, */*" },
+      },
+      (res) => {
+        const statusCode = res.statusCode || 0;
+        const contentType = res.headers["content-type"] || "";
+
+        if (statusCode >= 300 && statusCode < 400) {
+          res.resume();
+          return finish({
+            success: false,
+            status: "Disconnected",
+            statusCode,
+            message: "Camera returned HTTP redirect, which is blocked for security.",
+          });
+        }
+
+        if (statusCode !== 200) {
+          res.resume();
+          return finish({
+            success: false,
+            status: "Disconnected",
+            statusCode,
+            message: `Camera returned HTTP status ${statusCode}.`,
+          });
+        }
+
+        const chunks: Buffer[] = [];
+        let totalBytes = 0;
+
+        res.on("data", (chunk: Buffer) => {
+          totalBytes += chunk.length;
+          chunks.push(chunk);
+          if (totalBytes > 2 * 1024 * 1024) {
+            req.destroy();
+          }
+        });
+
+        res.on("end", () => {
+          const latencyMs = Date.now() - startTime;
+          const fullBuf = Buffer.concat(chunks);
+          const frame = extractFirstJpegFrame(fullBuf) || (isValidJpeg(fullBuf) ? fullBuf : null);
+
+          if (frame && isValidJpeg(frame)) {
+            return finish({
+              success: true,
+              status: "Connected",
+              statusCode,
+              contentType,
+              latencyMs,
+              message: `ESP32-CAM verified successfully (${latencyMs}ms latency). Valid JPEG frame validated.`,
+              isVerified: true,
+            });
+          }
+
+          // If capture returned non-image content (such as text/html), reject as non-camera response
+          if (!contentType.toLowerCase().includes("image") && !contentType.toLowerCase().includes("multipart")) {
+            return finish({
+              success: false,
+              status: "Disconnected",
+              statusCode,
+              contentType,
+              latencyMs,
+              message: "Camera responded, but did not return a valid JPEG image payload.",
+            });
+          }
+
+          // If capture failed, try stream ping before giving up
+          hardwareAdapter.camera.pingCamera(streamTestUrl).then((streamPing) => {
+            if (streamPing.online && streamPing.contentType && (streamPing.contentType.includes("image") || streamPing.contentType.includes("multipart"))) {
+              return finish({
+                success: true,
+                status: "Connected",
+                statusCode: streamPing.statusCode,
+                contentType: streamPing.contentType,
+                latencyMs: streamPing.latencyMs,
+                message: "ESP32-CAM stream endpoint is responsive and connected.",
+                isVerified: true,
+              });
+            }
+            return finish({
+              success: false,
+              status: "Disconnected",
+              statusCode,
+              contentType,
+              latencyMs,
+              message: "Camera responded, but did not return a valid JPEG image payload.",
+            });
+          }).catch(() => {
+            return finish({
+              success: false,
+              status: "Disconnected",
+              statusCode,
+              contentType,
+              latencyMs,
+              message: "Camera responded, but did not return a valid JPEG image payload.",
+            });
+          });
+        });
+
+        res.on("error", (err: any) => {
+          finish({
+            success: false,
+            status: "Disconnected",
+            message: `Camera stream error: ${err.message}`,
+          });
+        });
+      }
+    );
+
+    req.on("timeout", () => {
+      req.destroy();
+      finish({
+        success: false,
+        status: "Connection timeout",
+        message: "Connection to ESP32-CAM timed out after 3500ms (timeout). Verify robot camera power and Wi-Fi connection.",
+      });
+    });
+
+    req.on("error", (err: any) => {
+      if (err.code === "ECONNREFUSED") {
+        finish({
+          success: false,
+          status: "Disconnected",
+          message: `Connection refused on ${parsedUrl.hostname}:${parsedUrl.port}. Ensure ESP32-CAM web server is running.`,
+        });
+      } else if (err.code === "EHOSTUNREACH" || err.code === "ENETUNREACH") {
+        finish({
+          success: false,
+          status: "Disconnected",
+          message: `Host unreachable (${parsedUrl.hostname}). Verify your laptop is on the robot's Wi-Fi network.`,
+        });
+      } else {
+        finish({
+          success: false,
+          status: "Disconnected",
+          message: `Network error: ${err.message}`,
+        });
+      }
+    });
+  });
+}
+
+// GET /api/robot/config: Load user's saved robot & camera configuration from database
+app.get("/api/robot/config", authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    let config = await getRobotConfig(userId);
+    const backendCam = hardwareAdapter.camera.getCameraConfig();
+
+    if (!config) {
+      config = {
+        userId: String(userId),
+        robotName: "VSTY Submersible Micro Robot",
+        cameraIp: backendCam.ip || "",
+        streamPort: 81,
+        capturePort: 80,
+        streamPath: "/stream",
+        capturePath: "/capture",
+        connectionMode: "LOCAL_GATEWAY",
+        lastVerifiedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    const streamUrl = config.cameraIp
+      ? `http://${config.cameraIp}:${config.streamPort}${config.streamPath}`
+      : null;
+    const captureUrl = config.cameraIp
+      ? `http://${config.cameraIp}:${config.capturePort}${config.capturePath}`
+      : null;
+
+    res.json({
+      success: true,
+      config: {
+        ...config,
+        streamUrl,
+        captureUrl,
+        proxyStreamUrl: "/api/camera/stream",
+        isCloudEnvironment: hardwareAdapter.config.isCloudEnvironment,
+        isVerified: hardwareAdapter.camera.status.isVerified,
+      },
+    });
+  } catch (err: any) {
+    logger.error("Error retrieving robot config:", err);
+    res.status(500).json({ success: false, message: "Failed to load robot configuration" });
+  }
+});
+
+// POST /api/robot/config: Save persistent camera & robot configuration per user
+app.post("/api/robot/config", authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const {
+      robotName,
+      cameraIp,
+      streamPort,
+      capturePort,
+      streamPath,
+      capturePath,
+      connectionMode,
+    } = req.body || {};
+
+    const cleanIp = typeof cameraIp === "string" ? cameraIp.trim() : "";
+    const cleanStreamPort = Number(streamPort) || 81;
+    const cleanCapturePort = Number(capturePort) || 80;
+    const cleanStreamPath = (typeof streamPath === "string" && streamPath.startsWith("/")) ? streamPath : "/stream";
+    const cleanCapturePath = (typeof capturePath === "string" && capturePath.startsWith("/")) ? capturePath : "/capture";
+    const cleanMode = (connectionMode === "CLOUD_REMOTE") ? "CLOUD_REMOTE" : "LOCAL_GATEWAY";
+
+    if (cleanStreamPort < 1 || cleanStreamPort > 65535 || cleanCapturePort < 1 || cleanCapturePort > 65535) {
+      return res.status(400).json({ success: false, message: "Port numbers must be between 1 and 65535." });
+    }
+
+    if (cleanIp) {
+      const testUrl = `http://${cleanIp}:${cleanStreamPort}${cleanStreamPath}`;
+      const guard = validateCamUrl(testUrl);
+      if (!guard.ok) {
+        return res.status(400).json({ success: false, status: "Invalid IP", message: guard.reason });
+      }
+    }
+
+    const newConfig: RobotConfig = {
+      userId: String(userId),
+      robotName: (typeof robotName === "string" && robotName.trim()) ? robotName.trim().slice(0, 64) : "VSTY Submersible Micro Robot",
+      cameraIp: cleanIp,
+      streamPort: cleanStreamPort,
+      capturePort: cleanCapturePort,
+      streamPath: cleanStreamPath,
+      capturePath: cleanCapturePath,
+      connectionMode: cleanMode,
+      lastVerifiedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const saved = await saveRobotConfig(newConfig);
+    if (!saved) {
+      return res.status(500).json({ success: false, message: "Database write failure while saving robot configuration." });
+    }
+
+    // Update active runtime camera target so proxy stream /api/camera/stream reflects new settings immediately
+    if (cleanIp) {
+      hardwareAdapter.camera.updateRuntimeCameraConfig({
+        ip: cleanIp,
+        streamPort: cleanStreamPort,
+        capturePort: cleanCapturePort,
+        streamPath: cleanStreamPath,
+        capturePath: cleanCapturePath,
+      });
+    }
+
+    eventLogs.unshift({
+      type: "HARDWARE",
+      message: `Camera configuration updated by ${req.user?.username || "operator"}: ${cleanIp ? `${cleanIp}:${cleanStreamPort}` : "unconfigured"} (${cleanMode})`,
+      time: new Date().toLocaleTimeString(),
+    });
+
+    const streamUrl = cleanIp ? `http://${cleanIp}:${cleanStreamPort}${cleanStreamPath}` : null;
+    const captureUrl = cleanIp ? `http://${cleanIp}:${cleanCapturePort}${cleanCapturePath}` : null;
+
+    res.json({
+      success: true,
+      message: "Camera configuration saved permanently.",
+      config: {
+        ...newConfig,
+        streamUrl,
+        captureUrl,
+        proxyStreamUrl: "/api/camera/stream",
+        isCloudEnvironment: hardwareAdapter.config.isCloudEnvironment,
+      },
+    });
+  } catch (err: any) {
+    logger.error("Error saving robot config:", err);
+    res.status(500).json({ success: false, message: "Failed to save robot configuration" });
+  }
+});
+
+// POST /api/camera/test-connection: Verify live camera response, check latency, and validate JPEG frames
+app.post("/api/camera/test-connection", authenticateToken, async (req: AuthenticatedRequest, res) => {
+  try {
+    const userId = req.user?.id;
+    let { cameraIp, streamPort, capturePort, streamPath, capturePath } = req.body || {};
+
+    if (!cameraIp && userId) {
+      const saved = await getRobotConfig(userId);
+      if (saved) {
+        cameraIp = saved.cameraIp;
+        streamPort = streamPort ?? saved.streamPort;
+        capturePort = capturePort ?? saved.capturePort;
+        streamPath = streamPath ?? saved.streamPath;
+        capturePath = capturePath ?? saved.capturePath;
+      }
+    }
+
+    const testRes = await testEspCamConnection({
+      cameraIp: cameraIp || hardwareAdapter.camera.getCameraConfig().ip,
+      streamPort: Number(streamPort) || 81,
+      capturePort: Number(capturePort) || 80,
+      streamPath: streamPath || "/stream",
+      capturePath: capturePath || "/capture",
+    });
+
+    if (testRes.success && userId) {
+      await updateLastVerified(userId);
+      hardwareAdapter.camera.updateRuntimeCameraConfig({
+        isVerified: true,
+      });
+    }
+
+    if (testRes.status === "Invalid IP") {
+      return res.status(400).json({
+        success: false,
+        status: testRes.status,
+        statusCode: testRes.statusCode,
+        message: testRes.message,
+      });
+    }
+
+    res.json({
+      success: testRes.success,
+      status: testRes.status,
+      statusCode: testRes.statusCode,
+      contentType: testRes.contentType,
+      latencyMs: testRes.latencyMs,
+      message: testRes.message,
+      isVerified: testRes.isVerified ?? false,
+    });
+  } catch (err: any) {
+    logger.error("Test connection error:", err);
+    res.status(500).json({
+      success: false,
+      status: "Disconnected",
+      message: "Test connection request failed: " + err.message,
+    });
+  }
+});
+
+// ==========================================================
 // IMAGE-TO-3D PREVIEW (experimental, visualization-only)
 // TripoSR via its public Gradio Space, called with the raw /call + SSE protocol
 // (the @gradio/client stream does not keep a Node process alive for the GPU job).
@@ -1140,7 +1639,7 @@ async function triposrCall(fn: string, data: any[], timeoutMs: number, signal?: 
   }
 }
 
-app.post("/api/generate-3d", generate3dLimiter, async (req, res) => {
+app.post("/api/generate-3d", requireOperatorOrAdmin, generate3dLimiter, async (req, res) => {
   if (!process.env.HF_API_TOKEN) {
     return res.status(503).json({ error: "3D preview is not configured on this server." });
   }
@@ -1195,7 +1694,7 @@ app.post("/api/generate-3d", generate3dLimiter, async (req, res) => {
 });
 
 // Gemini AI Image Analysis API
-app.post("/api/analyze-image", async (req, res) => {
+app.post("/api/analyze-image", requireOperatorOrAdmin, async (req, res) => {
   const { image, missionName, inspectionArea } = req.body || {};
   const safeMissionName = xss(missionName || "MANUAL");
   const safeInspectionArea = xss(inspectionArea || "Unknown");
@@ -1367,7 +1866,7 @@ app.get("/api/analysis-history", async (req, res) => {
   res.json(await getHistory());
 });
 
-app.post("/api/analysis-history", async (req, res) => {
+app.post("/api/analysis-history", requireOperatorOrAdmin, async (req, res) => {
   try {
     const item = req.body;
     if (!item || typeof item !== "object") {
@@ -1382,7 +1881,7 @@ app.post("/api/analysis-history", async (req, res) => {
   }
 });
 
-app.delete("/api/analysis-history/:id", async (req, res) => {
+app.delete("/api/analysis-history/:id", requireOperatorOrAdmin, async (req, res) => {
   const deleted = await deleteHistoryItem(req.params.id);
   if (deleted) {
     res.json({ success: true });
@@ -1404,7 +1903,7 @@ app.get("/api/detections", async (req, res) => {
 });
 
 // Get AI stats
-app.post("/api/maps-grounding", async (req, res) => {
+app.post("/api/maps-grounding", requireOperatorOrAdmin, async (req, res) => {
   try {
     const { query, latitude, longitude } = req.body || {};
     const lat = typeof latitude === "number" && !isNaN(latitude) ? latitude : 12.9082;
@@ -1528,7 +2027,7 @@ app.get("/api/hardware/status", async (req, res) => {
   res.json(status);
 });
 
-app.post("/api/hardware/mode", async (req, res) => {
+app.post("/api/hardware/mode", requireAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Hardware mode switching is restricted to local host execution." });
   }
@@ -1545,7 +2044,7 @@ app.post("/api/hardware/mode", async (req, res) => {
   res.json({ success: true, ...result });
 });
 
-app.post("/api/hardware/connect", async (req, res) => {
+app.post("/api/hardware/connect", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Physical controller connection is restricted to local host execution." });
   }
@@ -1563,7 +2062,7 @@ app.post("/api/hardware/connect", async (req, res) => {
   res.status(result.ok ? 200 : 503).json({ success: result.ok, ...result });
 });
 
-app.post("/api/hardware/disconnect", async (req, res) => {
+app.post("/api/hardware/disconnect", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Restricted to local host execution." });
   }
@@ -1576,7 +2075,7 @@ app.post("/api/hardware/disconnect", async (req, res) => {
   res.json({ success: true, message: "Controller disconnected." });
 });
 
-app.post("/api/hardware/arm", async (req, res) => {
+app.post("/api/hardware/arm", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Propulsion arming is restricted to local bench execution." });
   }
@@ -1589,7 +2088,7 @@ app.post("/api/hardware/arm", async (req, res) => {
   res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
 });
 
-app.post("/api/hardware/disarm", async (req, res) => {
+app.post("/api/hardware/disarm", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Restricted to local host execution." });
   }
@@ -1602,7 +2101,7 @@ app.post("/api/hardware/disarm", async (req, res) => {
   res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
 });
 
-app.post("/api/hardware/clear-estop", async (req, res) => {
+app.post("/api/hardware/clear-estop", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Restricted to local host execution." });
   }
@@ -1615,7 +2114,7 @@ app.post("/api/hardware/clear-estop", async (req, res) => {
   res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
 });
 
-app.post("/api/hardware/motor-test", async (req, res) => {
+app.post("/api/hardware/motor-test", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Stage-1 motor bench test is restricted to local execution." });
   }
@@ -1631,7 +2130,7 @@ app.post("/api/hardware/motor-test", async (req, res) => {
   res.status(result.ok ? 200 : 400).json({ success: result.ok, ...result });
 });
 
-app.post("/api/hardware/servo-test", async (req, res) => {
+app.post("/api/hardware/servo-test", requireOperatorOrAdmin, async (req, res) => {
   if (!isLocalRequest(req)) {
     return res.status(403).json({ success: false, message: "Stage-1 servo bench test is restricted to local execution." });
   }
@@ -1681,21 +2180,8 @@ app.get("/video_feed", async (req, res) => {
 });
 
 // ==========================================================
-// AUTHENTICATION & SECURITY
+// AUTHENTICATION & SECURITY ENDPOINTS
 // ==========================================================
-app.use(cookieParser());
-
-// JWT_SECRET must be set in any real deployment. We keep a dev-only fallback so
-// local runs work, but refuse to mint tokens with it in production (a known default
-// secret is forgeable). Set JWT_SECRET in the environment — see .env.example.
-const JWT_CONFIGURED = Boolean(process.env.JWT_SECRET);
-const JWT_SECRET = process.env.JWT_SECRET || "dev-only-insecure-secret-change-me";
-if (!JWT_CONFIGURED) {
-    const msg = "JWT_SECRET is not set — using an insecure development default.";
-    if (process.env.NODE_ENV === "production") logger.error(msg + " Legacy password login is disabled until it is set.");
-    else logger.warn(msg);
-}
-
 const authRateLimitMax = parseInt(process.env.AUTH_RATE_LIMIT_MAX || "25", 10);
 
 const loginLimiter = rateLimit({
@@ -1840,38 +2326,46 @@ app.post("/api/auth/logout", (_req, res) => {
     return res.json({ success: true });
 });
 
-app.get("/api/auth/status", (_req, res) => {
+app.get("/api/auth/status", (req: AuthenticatedRequest, res) => {
     const store = getAuthStore() as any;
-    const diag = typeof store.getDiagnosticStatus === "function" ? store.getDiagnosticStatus() : {};
-    const relatedEnvNames = Object.keys(process.env).filter((k) =>
-        /SUPABASE|DATABASE|POSTGRES|MC_|MISSION_CONTROL|AUTH|JWT|SESSION|SECRET/i.test(k) &&
-        !/^ANTIGRAVITY_/i.test(k)
-    );
+    // Check if user is an authenticated admin
+    const authHeader = req.headers["authorization"];
+    const token = (authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null) || req.cookies?.token;
+    let isAdmin = false;
+    if (token && typeof token === "string" && !token.startsWith("guest-")) {
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET) as any;
+            if (decoded?.role === "admin") isAdmin = true;
+        } catch {}
+    }
+
+    if (isAdmin) {
+        const diag = typeof store.getDiagnosticStatus === "function" ? store.getDiagnosticStatus() : {};
+        const relatedEnvNames = Object.keys(process.env).filter((k) =>
+            /SUPABASE|DATABASE|POSTGRES|MC_|MISSION_CONTROL|AUTH|JWT|SESSION|SECRET/i.test(k) &&
+            !/^ANTIGRAVITY_/i.test(k)
+        );
+        return res.json({
+            success: true,
+            backendType: store.backendType,
+            jwtConfigured: JWT_CONFIGURED,
+            ...diag,
+            configuredEnvKeys: relatedEnvNames.sort()
+        });
+    }
+
+    // Unauthenticated/operator view: sanitized status without leaking sensitive environment variable names
     return res.json({
         success: true,
         backendType: store.backendType,
         jwtConfigured: JWT_CONFIGURED,
-        ...diag,
-        configuredEnvKeys: relatedEnvNames.sort()
+        authConfigured: JWT_CONFIGURED,
     });
 });
 
-app.get("/api/auth/audit-logs", (_req, res) => {
+app.get("/api/auth/audit-logs", requireAdmin, (_req, res) => {
     res.json({ success: true, logs: auditLogs });
 });
-
-
-// Middleware to protect API routes
-function authenticateToken(req, res, next) {
-    const token = req.cookies.token || req.headers['authorization']?.split(' ')[1];
-    if (!token) return res.status(401).json({ success: false, message: "Unauthorized" });
-
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ success: false, message: "Forbidden" });
-        req.user = user;
-        next();
-    });
-};
 
 // ==========================================================
 // VITE DEV SERVER / PRODUCTION SETUP

@@ -173,7 +173,8 @@ export class FileAuthStore implements AuthStoreAdapter {
         this.users = [];
       }
     }
-    if (seedDefaultAdmin && !this.users.some((u) => u.username.toLowerCase() === "vsty")) {
+    const isProduction = process.env.NODE_ENV === "production";
+    if (seedDefaultAdmin && !isProduction && !this.users.some((u) => u.username.toLowerCase() === "vsty")) {
       this.users.unshift({ ...DEFAULT_VSTY_USER });
     }
   }

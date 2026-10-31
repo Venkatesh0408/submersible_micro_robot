@@ -20,6 +20,15 @@ export async function safeFetchJson(url, options = {}) {
         }
         const res = await fetch(url, { ...options, headers, signal: controller.signal });
         if (!res.ok) {
+            const contentType = res.headers.get("content-type") || "";
+            if (contentType.includes("application/json")) {
+                try {
+                    const text = await res.text();
+                    return JSON.parse(text);
+                } catch {
+                    return null;
+                }
+            }
             return null;
         }
         const contentType = res.headers.get("content-type") || "";
@@ -141,6 +150,63 @@ export async function updateCameraConfig(config) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config)
+    });
+}
+
+// Persistent User Robot & Dynamic Camera Configuration APIs
+export async function getRobotConfig() {
+    return await safeFetchJson(`${BASE_URL}/api/robot/config`);
+}
+
+export async function saveRobotConfig(config) {
+    return await safeFetchJson(`${BASE_URL}/api/robot/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config)
+    });
+}
+
+export async function testCameraConnection(params = {}) {
+    return await safeFetchJson(`${BASE_URL}/api/camera/test-connection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params)
+    });
+}
+
+// ======================================================
+// HARDWARE CONTROLS & DIAGNOSTICS (HAL)
+// ======================================================
+
+export async function getHardwareStatus() {
+    return await safeFetchJson(`${BASE_URL}/api/hardware/status`);
+}
+
+export async function armPropulsion() {
+    return await safeFetchJson(`${BASE_URL}/api/hardware/arm`, { method: "POST" });
+}
+
+export async function disarmPropulsion() {
+    return await safeFetchJson(`${BASE_URL}/api/hardware/disarm`, { method: "POST" });
+}
+
+export async function clearEstop() {
+    return await safeFetchJson(`${BASE_URL}/api/hardware/clear-estop`, { method: "POST" });
+}
+
+export async function testMotor(channel = 1, pwm = 90, durationMs = 500) {
+    return await safeFetchJson(`${BASE_URL}/api/hardware/motor-test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel, pwm, durationMs })
+    });
+}
+
+export async function testServo(channel = 1, angleDeg = 90) {
+    return await safeFetchJson(`${BASE_URL}/api/hardware/servo-test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel, angleDeg })
     });
 }
 
