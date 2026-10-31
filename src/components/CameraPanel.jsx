@@ -33,8 +33,8 @@ export default function CameraPanel() {
     } catch {}
   }, []);
 
-  const [fps] = useState(30);
-  const [resolution] = useState("VGA / SVGA");
+  const [fps, setFps] = useState(0);
+  const [resolution] = useState("VGA 640x480");
 
   // Camera connection & configuration states
   const [cameraIp, setCameraIp] = useState("");
@@ -112,9 +112,15 @@ export default function CameraPanel() {
           const isOnline = Boolean(res.status.online);
           setEspConnected(isOnline);
           setEspLatency(res.status.latencyMs ?? null);
+          setFps(Number(res.status.fps) || 0);
           if (isOnline) {
             setConnectionState("Connected");
             setConnectionMessage(res.status.message || "ESP32-CAM stream is reachable.");
+          } else {
+            setConnectionState("Disconnected");
+            setConnectionMessage(res.status.isCloudEnvironment
+              ? "Waiting for the VSTY Camera Gateway on your laptop. Start the gateway to send live frames to Render."
+              : "ESP32-CAM is not reachable. Check its Wi-Fi connection and camera address.");
           }
         }
       } catch (err) {
@@ -234,6 +240,24 @@ export default function CameraPanel() {
     setConnectionMessage("Probing ESP32-CAM stream and validating JPEG frames...");
 
     try {
+      const cloudStatus = await getCameraStatus(true);
+      if (cloudStatus?.status?.isCloudEnvironment) {
+        const relayOnline = Boolean(cloudStatus.status.online);
+        setEspConnected(relayOnline);
+        setFps(Number(cloudStatus.status.fps) || 0);
+        if (relayOnline) {
+          setConnectionState("Connected");
+          setEspLatency(null);
+          setConnectionMessage("Laptop gateway is relaying verified camera frames to Render.");
+          setStatusNotice("Live camera relay verified!");
+          setStreamKey(k => k + 1);
+        } else {
+          setConnectionState("Disconnected");
+          setConnectionMessage("Render is ready, but no frames are arriving. Start the VSTY Camera Gateway on your laptop.");
+        }
+        return;
+      }
+
       const res = await testCameraConnection({
         cameraIp,
         streamPort: Number(streamPort) || 81,
