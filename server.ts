@@ -1046,9 +1046,9 @@ function writeRelayMjpegFrame(client: express.Response, frame: Buffer): void {
   }
   try {
     client.write(Buffer.concat([
-      Buffer.from("--frame\\r\\nContent-Type: image/jpeg\\r\\nContent-Length: " + frame.length + "\\r\\n\\r\\n"),
+      Buffer.from("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + frame.length + "\r\n\r\n"),
       frame,
-      Buffer.from("\\r\\n"),
+      Buffer.from("\r\n"),
     ]));
   } catch {
     relayStreamClients.delete(client);
