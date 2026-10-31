@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { useMission } from "../context/MissionContext";
 import {
   WifiOff, Wifi, Camera, Video, CheckCircle, AlertTriangle, AlertCircle, Clock,
-  Loader2, X, Maximize2, Minimize2, ZoomIn, Eye, Crosshair, Download, Settings, Save, RefreshCw
+  Loader2, X, Maximize2, Minimize2, ZoomIn, Eye, Crosshair, Download, Settings, Save, RefreshCw, Copy
 } from "lucide-react";
 import {
   fetchMedia, captureEspSnapshot, getCameraStatus,
@@ -33,8 +33,8 @@ export default function CameraPanel() {
     } catch {}
   }, []);
 
-  const [fps] = useState(30);
-  const [resolution] = useState("VGA / SVGA");
+  const [fps, setFps] = useState(0);
+  const [resolution] = useState("VGA 640x480");
 
   // Camera connection & configuration states
   const [cameraIp, setCameraIp] = useState("");
@@ -112,9 +112,15 @@ export default function CameraPanel() {
           const isOnline = Boolean(res.status.online);
           setEspConnected(isOnline);
           setEspLatency(res.status.latencyMs ?? null);
+          setFps(Number(res.status.fps) || 0);
           if (isOnline) {
             setConnectionState("Connected");
             setConnectionMessage(res.status.message || "ESP32-CAM stream is reachable.");
+          } else {
+            setConnectionState("Disconnected");
+            setConnectionMessage(res.status.isCloudEnvironment
+              ? "Waiting for the VSTY Camera Gateway on your laptop. Start the gateway to send live frames to Render."
+              : "ESP32-CAM is not reachable. Check its Wi-Fi connection and camera address.");
           }
         }
       } catch (err) {
@@ -234,6 +240,24 @@ export default function CameraPanel() {
     setConnectionMessage("Probing ESP32-CAM stream and validating JPEG frames...");
 
     try {
+      const cloudStatus = await getCameraStatus(true);
+      if (cloudStatus?.status?.isCloudEnvironment) {
+        const relayOnline = Boolean(cloudStatus.status.online);
+        setEspConnected(relayOnline);
+        setFps(Number(cloudStatus.status.fps) || 0);
+        if (relayOnline) {
+          setConnectionState("Connected");
+          setEspLatency(null);
+          setConnectionMessage("Laptop gateway is relaying verified camera frames to Render.");
+          setStatusNotice("Live camera relay verified!");
+          setStreamKey(k => k + 1);
+        } else {
+          setConnectionState("Disconnected");
+          setConnectionMessage("Render is ready, but no frames are arriving. Start the VSTY Camera Gateway on your laptop.");
+        }
+        return;
+      }
+
       const res = await testCameraConnection({
         cameraIp,
         streamPort: Number(streamPort) || 81,
@@ -263,6 +287,22 @@ export default function CameraPanel() {
       setConnectionMessage("Test failed: " + (err?.message || "Network error"));
     } finally {
       setIsTestingConnection(false);
+    }
+  };
+
+  // Copy the signed-in operator token for the laptop gateway. Never log or display the token.
+  const handleCopyGatewayToken = async () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setStatusNotice("No active login token found. Sign in again first.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(token);
+      setStatusNotice("Gateway token copied. Paste it into PowerShell as VSTY_AUTH_TOKEN. Keep it private.");
+      setTimeout(() => setStatusNotice(""), 6000);
+    } catch {
+      setStatusNotice("Clipboard access was blocked. Use browser DevTools to copy your login token.");
     }
   };
 
@@ -656,6 +696,26 @@ export default function CameraPanel() {
             >
               {isTestingConnection ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
               Test Connection
+            </button>
+
+            <button
+              onClick={handleCopyGatewayToken}
+              title="Copy your private login token for the laptop camera gateway. Treat it like a password."
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 12px",
+                borderRadius: "8px",
+                border: "1px solid rgba(148,163,184,0.45)",
+                background: "rgba(22,32,58,0.6)",
+                color: "#cbd5e1",
+                fontWeight: 700,
+                fontSize: "12px",
+                cursor: "pointer"
+              }}
+            >
+              <Copy size={13} /> Copy Gateway Token
             </button>
 
             <button
