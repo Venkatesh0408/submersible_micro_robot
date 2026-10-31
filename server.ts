@@ -1029,11 +1029,97 @@ app.delete("/api/media/:filename", requireOperatorOrAdmin, (req, res) => {
 });
 
 // ==========================================================
+// ESP32-CAM LIVE RELAY (Laptop -> Render -> Dashboard)
+// ==========================================================
+const CAMERA_RELAY_STALE_MS = 8000;
+const CAMERA_RELAY_MAX_FRAME_BYTES = 512 * 1024;
+let latestRelayFrame: Buffer | null = null;
+let latestRelayFrameAtMs = 0;
+let relayFrameTimes: number[] = [];
+const relayStreamClients = new Set<express.Response>();
+
+function writeRelayMjpegFrame(client: express.Response, frame: Buffer): void {
+  if (client.destroyed || client.writableEnded || client.writableLength > 1024 * 1024) {
+    relayStreamClients.delete(client);
+    if (!client.writableEnded) client.end();
+    return;
+  }
+  try {
+    client.write(Buffer.concat([
+      Buffer.from("--frame\\r\\nContent-Type: image/jpeg\\r\\nContent-Length: " + frame.length + "\\r\\n\\r\\n"),
+      frame,
+      Buffer.from("\\r\\n"),
+    ]));
+  } catch {
+    relayStreamClients.delete(client);
+    if (!client.writableEnded) client.end();
+  }
+}
+
+function getCameraRelayStatus() {
+  const ageMs = latestRelayFrameAtMs ? Date.now() - latestRelayFrameAtMs : null;
+  const recent = relayFrameTimes.filter((t) => Date.now() - t <= 2000);
+  return {
+    online: Boolean(latestRelayFrame && ageMs !== null && ageMs <= CAMERA_RELAY_STALE_MS),
+    verifiedAtMs: latestRelayFrameAtMs || null,
+    frameAgeMs: ageMs,
+    fps: recent.length > 1 ? Math.round((recent.length - 1) / 2 * 10) / 10 : recent.length,
+    frameBytes: latestRelayFrame?.length || 0,
+    isCloudEnvironment: hardwareAdapter.config.isCloudEnvironment,
+    message: latestRelayFrame && ageMs !== null && ageMs <= CAMERA_RELAY_STALE_MS
+      ? "Live camera relay is receiving verified JPEG frames."
+      : "Waiting for the laptop camera gateway to send frames.",
+  };
+}
+
+app.post(
+  "/api/camera/relay/frame",
+  authenticateToken,
+  express.raw({ type: "image/jpeg", limit: CAMERA_RELAY_MAX_FRAME_BYTES }),
+  (req: AuthenticatedRequest, res: express.Response) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length < 64 || req.body.length > CAMERA_RELAY_MAX_FRAME_BYTES) {
+      return res.status(400).json({ success: false, message: "Expected a JPEG frame up to 512 KB." });
+    }
+    if (!isValidJpeg(req.body)) {
+      return res.status(415).json({ success: false, message: "Frame is not a structurally valid JPEG." });
+    }
+    latestRelayFrame = Buffer.from(req.body);
+    latestRelayFrameAtMs = Date.now();
+    relayFrameTimes.push(latestRelayFrameAtMs);
+    relayFrameTimes = relayFrameTimes.filter((t) => latestRelayFrameAtMs - t <= 2000);
+    for (const client of relayStreamClients) writeRelayMjpegFrame(client, latestRelayFrame);
+    return res.status(202).json({ success: true, receivedAt: latestRelayFrameAtMs });
+  }
+);
+
+function handleCameraRelayStream(_req: express.Request, res: express.Response) {
+  const status = getCameraRelayStatus();
+  if (!status.online || !latestRelayFrame) {
+    return res.status(503).set("Retry-After", "2").type("text/plain").send("Camera relay is waiting for the laptop gateway.");
+  }
+  res.status(200);
+  res.set({
+    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders();
+  relayStreamClients.add(res);
+  writeRelayMjpegFrame(res, latestRelayFrame);
+  const cleanup = () => relayStreamClients.delete(res);
+  res.on("close", cleanup);
+  res.on("finish", cleanup);
+}
+
+// ==========================================================
 // ESP32-CAM WIRELESS WIFI CAMERA STREAMING & PROXY
 // ==========================================================
 
 // Ping/Test ESP32-CAM Camera connection over WiFi
 const handleCamPing = async (_req: express.Request, res: express.Response) => {
+  if (hardwareAdapter.config.isCloudEnvironment) return res.json(getCameraRelayStatus());
   const targetUrl = hardwareAdapter.camera.getDefaultStreamUrl();
   const status = await hardwareAdapter.camera.pingCamera(targetUrl);
   if (!res.headersSent) {
@@ -1055,6 +1141,7 @@ app.get("/api/rpi-ping", handleCamPing);
 // Proxy ESP32-CAM MJPEG camera stream to avoid browser CORS/Mixed-Content issues.
 // Exclusively targets the backend-configured stream target to prevent arbitrary proxying.
 const handleCamProxy = (req: express.Request, res: express.Response) => {
+  if (hardwareAdapter.config.isCloudEnvironment) return handleCameraRelayStream(req, res);
   const targetUrl = hardwareAdapter.camera.getDefaultStreamUrl();
   hardwareAdapter.camera.proxyStream(targetUrl, req, res);
 };
@@ -1067,6 +1154,20 @@ app.get("/api/camera/stream", handleCamProxy);
 // Exclusively resolves backend-configured capture URL.
 const handleCamSnapshot = async (req: express.Request, res: express.Response) => {
   const { filename } = req.body || {};
+  if (hardwareAdapter.config.isCloudEnvironment) {
+    if (!latestRelayFrame || Date.now() - latestRelayFrameAtMs > CAMERA_RELAY_STALE_MS) {
+      return res.status(503).json({ success: false, simulated: false, message: "Camera relay is offline. Start the laptop gateway before capturing." });
+    }
+    const safeName = filename ? path.basename(String(filename)).replace(/[^a-zA-Z0-9_.-]/g, "_") : "esp-snapshot-" + Date.now() + ".jpg";
+    if (!fsLib.existsSync(mediaDir)) fsLib.mkdirSync(mediaDir, { recursive: true });
+    fsLib.writeFileSync(path.join(mediaDir, safeName), latestRelayFrame);
+    return res.json({
+      success: true,
+      simulated: false,
+      message: "Snapshot captured from the live laptop-to-Render camera relay.",
+      file: { filename: safeName, url: "/media/" + safeName, sizeBytes: latestRelayFrame.length },
+    });
+  }
   const targetUrl = hardwareAdapter.camera.getDefaultCaptureUrl();
 
   const snapResult = await hardwareAdapter.camera.captureSnapshotToFile(targetUrl, mediaDir, filename);
@@ -1147,6 +1248,19 @@ app.post("/api/camera/config", requireAdmin, (req, res) => {
 });
 
 app.get("/api/camera/status", async (req, res) => {
+  if (hardwareAdapter.config.isCloudEnvironment) {
+    const relayStatus = getCameraRelayStatus();
+    return res.json({
+      success: true,
+      status: {
+        ...relayStatus,
+        streamReachable: relayStatus.online,
+        isVerified: relayStatus.online,
+        failureCount: relayStatus.online ? 0 : 1,
+        latencyMs: null,
+      },
+    });
+  }
   const quick = req.query.quick === "true";
   let status = hardwareAdapter.camera.status;
   if (!quick && !status.online && !hardwareAdapter.config.isCloudEnvironment) {
