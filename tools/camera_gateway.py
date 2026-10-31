@@ -66,10 +66,9 @@ def main():
     server = args.server_url.rstrip("/")
     upload_url = server + "/api/camera/relay/frame"
     session = requests.Session()
+    # Never send the Render login token to the local ESP32-CAM.
     session.headers.update({
-        "Authorization": "Bearer " + token,
-        "Content-Type": "image/jpeg",
-        "Accept": "application/json",
+        "Accept": "*/*",
         "Connection": "keep-alive",
     })
     frame_interval = 1.0 / args.fps
@@ -99,12 +98,24 @@ def main():
                     if wait > 0:
                         time.sleep(wait)
                     try:
-                        result = session.post(upload_url, data=frame, timeout=(5, 10))
+                        result = session.post(
+                            upload_url,
+                            data=frame,
+                            headers={
+                                "Authorization": "Bearer " + token,
+                                "Content-Type": "image/jpeg",
+                                "Accept": "application/json",
+                            },
+                            timeout=(5, 10),
+                        )
                     except requests.RequestException as exc:
                         print("Render upload failed: " + str(exc))
                         break
                     if result.status_code == 401:
                         print("ERROR: Render rejected the login token (HTTP 401). Sign in again and refresh the token.")
+                        return 3
+                    if result.status_code == 403:
+                        print("ERROR: This login does not have operator/admin access to the camera relay.")
                         return 3
                     if result.status_code == 413:
                         print("ERROR: Frame too large. Lower ESP32-CAM resolution or increase JPEG compression.")
