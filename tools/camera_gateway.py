@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Relay ESP32-CAM MJPEG to the VSTY Render dashboard.")
     parser.add_argument("--camera-url", default=DEFAULT_CAMERA, help="Local ESP32-CAM MJPEG URL")
     parser.add_argument("--server-url", default=DEFAULT_SERVER, help="VSTY Render server base URL")
-    parser.add_argument("--fps", type=float, default=20.0, help="Maximum upload frame rate (default: 20)")
+    parser.add_argument("--fps", type=float, default=30.0, help="Maximum upload frame rate (default: 30; server safety ceiling: 40)")
     parser.add_argument("--max-frame-bytes", type=int, default=MAX_FRAME_BYTES)
     return parser.parse_args()
 
@@ -55,8 +55,8 @@ def main():
         print("ERROR: Set VSTY_AUTH_TOKEN to your VSTY software login token first.")
         print("Do not share this token or commit it to GitHub.")
         return 2
-    if args.fps <= 0 or args.fps > 30:
-        print("ERROR: --fps must be greater than 0 and no more than 30.")
+    if args.fps <= 0 or args.fps > 40:
+        print("ERROR: --fps must be greater than 0 and no more than 40.")
         return 2
     parsed = urlparse(args.camera_url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -80,7 +80,7 @@ def main():
     print("VSTY Camera Gateway")
     print("Camera : " + args.camera_url)
     print("Render : " + server)
-    print("Limit  : " + str(args.fps) + " FPS")
+    print("Limit  : " + str(args.fps) + " FPS (server ceiling: 40)")
     print("Press Ctrl+C to stop.\n")
 
     while True:
