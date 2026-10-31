@@ -107,13 +107,16 @@ export function validateCamUrl(raw: string, opts?: { allowLoopback?: boolean }):
   }
   const a = Number(m[1]);
   const b = Number(m[2]);
+  const c = Number(m[3]);
   if (a >= 224) {
     return { ok: false, reason: "Multicast and reserved addresses are not permitted" };
   }
   const isPrivate =
     a === 10 ||
     (a === 192 && b === 168) ||
-    (a === 172 && b >= 16 && b <= 31);
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 100 && b >= 64 && b <= 127);
   if (!isPrivate) {
     return {
       ok: false,
@@ -877,3 +880,4 @@ export class Esp32CameraService {
     }
   }
 }
+

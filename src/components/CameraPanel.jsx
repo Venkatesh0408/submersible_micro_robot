@@ -153,6 +153,51 @@ export default function CameraPanel() {
     loadRecentMedia();
   }, []);
 
+  // Automatically sanitize camera input: extracts clean IP, port, and path if user pasted a full URL
+  const handleIpChange = (val) => {
+    let raw = val.trim();
+    if (raw.startsWith("http://") || raw.startsWith("https://")) {
+      try {
+        const u = new URL(raw);
+        setCameraIp(u.hostname);
+        if (u.port) {
+          const p = Number(u.port);
+          if (p >= 1 && p <= 65535) {
+            setStreamPort(p);
+            setCapturePort(p);
+            if (p === 8080) {
+              setStreamPath("/video");
+              setCapturePath("/shot.jpg");
+            }
+          }
+        }
+        if (u.pathname && u.pathname !== "/") {
+          setStreamPath(u.pathname);
+        }
+        return;
+      } catch {
+        raw = raw.replace(/^https?:\/\//i, "");
+      }
+    }
+    if (raw.includes(":")) {
+      const parts = raw.split(":");
+      const hostPart = parts[0].trim();
+      const portPart = parts[1].split("/")[0].trim();
+      const p = Number(portPart);
+      if (p >= 1 && p <= 65535) {
+        setStreamPort(p);
+        setCapturePort(p);
+        if (p === 8080) {
+          setStreamPath("/video");
+          setCapturePath("/shot.jpg");
+        }
+      }
+      setCameraIp(hostPart);
+      return;
+    }
+    setCameraIp(val);
+  };
+
   // Save camera configuration permanently in database for authenticated user
   const handleSaveConfig = async () => {
     setIsSavingConfig(true);
@@ -554,7 +599,8 @@ export default function CameraPanel() {
               type="text"
               placeholder="e.g. 192.168.1.184, 10.41.235.60"
               value={cameraIp}
-              onChange={(e) => setCameraIp(e.target.value)}
+              onChange={(e) => handleIpChange(e.target.value)}
+              onBlur={(e) => handleIpChange(e.target.value)}
               style={{
                 flex: 1,
                 padding: "8px 12px",
@@ -750,6 +796,53 @@ export default function CameraPanel() {
                   <option value="CLOUD_REMOTE">Cloud Remote (Render)</option>
                 </select>
               </div>
+            </div>
+
+            {/* Quick Camera Hardware Profile Presets */}
+            <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", padding: "4px 0" }}>
+              <span style={{ fontSize: "11px", color: "#64748b", fontWeight: 600 }}>Presets:</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setStreamPort(81);
+                  setCapturePort(80);
+                  setStreamPath("/stream");
+                  setCapturePath("/capture");
+                }}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "11px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(14, 165, 233, 0.4)",
+                  background: "rgba(14, 165, 233, 0.12)",
+                  color: "#38bdf8",
+                  cursor: "pointer",
+                  fontWeight: 600
+                }}
+              >
+                ESP32-CAM (81/80, /stream)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setStreamPort(8080);
+                  setCapturePort(8080);
+                  setStreamPath("/video");
+                  setCapturePath("/shot.jpg");
+                }}
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "11px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(16, 185, 129, 0.4)",
+                  background: "rgba(16, 185, 129, 0.12)",
+                  color: "#34d399",
+                  cursor: "pointer",
+                  fontWeight: 600
+                }}
+              >
+                Phone IP Webcam (8080, /video)
+              </button>
             </div>
 
             {/* Generated URLs Dynamic Preview */}
@@ -1044,3 +1137,5 @@ export default function CameraPanel() {
     </div>
   );
 }
+
+

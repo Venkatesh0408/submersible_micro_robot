@@ -1175,6 +1175,61 @@ app.get("/api/camera/status", async (req, res) => {
 // PERSISTENT USER ROBOT & DYNAMIC CAMERA CONFIGURATION API
 // ==========================================================
 
+export function sanitizeCameraEndpoint(input: {
+  cameraIp?: string;
+  streamPort?: number | string;
+  capturePort?: number | string;
+  streamPath?: string;
+  capturePath?: string;
+}) {
+  let rawIp = typeof input.cameraIp === "string" ? input.cameraIp.trim() : "";
+  let cleanIp = rawIp;
+  let streamPort = Number(input.streamPort) || 81;
+  let capturePort = Number(input.capturePort) || 80;
+  let streamPath = (typeof input.streamPath === "string" && input.streamPath.startsWith("/")) ? input.streamPath : "/stream";
+  let capturePath = (typeof input.capturePath === "string" && input.capturePath.startsWith("/")) ? input.capturePath : "/capture";
+
+  if (cleanIp.startsWith("http://") || cleanIp.startsWith("https://")) {
+    try {
+      const parsed = new URL(cleanIp);
+      cleanIp = parsed.hostname;
+      if (parsed.port) {
+        const p = Number(parsed.port);
+        if (p >= 1 && p <= 65535) {
+          streamPort = p;
+          capturePort = p;
+        }
+      }
+      if (parsed.pathname && parsed.pathname !== "/") {
+        streamPath = parsed.pathname;
+      }
+    } catch {
+      cleanIp = cleanIp.replace(/^https?:\/\//i, "");
+    }
+  }
+
+  if (cleanIp.includes(":")) {
+    const parts = cleanIp.split(":");
+    cleanIp = parts[0].trim();
+    const portPart = parts[1].split("/")[0].trim();
+    const p = Number(portPart);
+    if (p >= 1 && p <= 65535) {
+      streamPort = p;
+      capturePort = p;
+    }
+  }
+
+  cleanIp = cleanIp.split("/")[0].trim();
+
+  return {
+    cameraIp: cleanIp,
+    streamPort,
+    capturePort,
+    streamPath,
+    capturePath,
+  };
+}
+
 async function testEspCamConnection(opts: {
   cameraIp: string;
   streamPort: number;
@@ -1190,7 +1245,8 @@ async function testEspCamConnection(opts: {
   message: string;
   isVerified?: boolean;
 }> {
-  const { cameraIp, streamPort, capturePort, streamPath, capturePath } = opts;
+  const sanitized = sanitizeCameraEndpoint(opts);
+  const { cameraIp, streamPort, capturePort, streamPath, capturePath } = sanitized;
   const ip = typeof cameraIp === "string" ? cameraIp.trim() : "";
   if (!ip) {
     return {
@@ -1449,11 +1505,18 @@ app.post("/api/robot/config", authenticateToken, async (req: AuthenticatedReques
       connectionMode,
     } = req.body || {};
 
-    const cleanIp = typeof cameraIp === "string" ? cameraIp.trim() : "";
-    const cleanStreamPort = Number(streamPort) || 81;
-    const cleanCapturePort = Number(capturePort) || 80;
-    const cleanStreamPath = (typeof streamPath === "string" && streamPath.startsWith("/")) ? streamPath : "/stream";
-    const cleanCapturePath = (typeof capturePath === "string" && capturePath.startsWith("/")) ? capturePath : "/capture";
+    const sanitized = sanitizeCameraEndpoint({
+      cameraIp,
+      streamPort,
+      capturePort,
+      streamPath,
+      capturePath,
+    });
+    const cleanIp = sanitized.cameraIp;
+    const cleanStreamPort = sanitized.streamPort;
+    const cleanCapturePort = sanitized.capturePort;
+    const cleanStreamPath = sanitized.streamPath;
+    const cleanCapturePath = sanitized.capturePath;
     const cleanMode = (connectionMode === "CLOUD_REMOTE") ? "CLOUD_REMOTE" : "LOCAL_GATEWAY";
 
     if (cleanStreamPort < 1 || cleanStreamPort > 65535 || cleanCapturePort < 1 || cleanCapturePort > 65535) {
@@ -2412,3 +2475,5 @@ if (!process.env.VERCEL && !process.env.SKIP_SERVER_LISTEN) {
 }
 
 export default app;
+
+
