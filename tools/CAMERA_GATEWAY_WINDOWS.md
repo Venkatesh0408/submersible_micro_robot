@@ -18,9 +18,9 @@ Open PowerShell in the repository folder and run:
 
 ## 3. Get your own login token
 
-1. Sign in to the VSTY dashboard.
-2. Press F12 and open **Application** (Chrome/Edge) -> **Local Storage** -> https://submersible-micro-robot.onrender.com.
-3. Copy the value of the token entry. Treat it like a password. Never send it in chat or commit it to GitHub.
+1. Sign in to the VSTY dashboard and open Mission Camera Control.
+2. Click **Copy Gateway Token**. The private login token is copied to your clipboard.
+3. Treat it like a password. Never send it in chat or commit it to GitHub. If the copy button is unavailable, use browser DevTools -> Application -> Local Storage -> the Render site -> token.
 
 In the same PowerShell window, set it for this session:
 
