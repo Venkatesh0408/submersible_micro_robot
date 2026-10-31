@@ -191,6 +191,9 @@ const generalLimiter = rateLimit({
   max: maxRequests,
   standardHeaders: true,
   legacyHeaders: false,
+  // The authenticated camera gateway can send up to 30 JPEG frames/second.
+  // It has its own payload validation and frame-rate guard below.
+  skip: (req) => req.path === "/camera/relay/frame",
   validate: { xForwardedForHeader: false },
   message: { success: false, message: "Too many requests from this IP, please try again later." }
 });
@@ -1074,7 +1077,7 @@ function getCameraRelayStatus() {
 
 app.post(
   "/api/camera/relay/frame",
-  authenticateToken,
+  requireOperatorOrAdmin,
   express.raw({ type: "image/jpeg", limit: CAMERA_RELAY_MAX_FRAME_BYTES }),
   (req: AuthenticatedRequest, res: express.Response) => {
     if (!Buffer.isBuffer(req.body) || req.body.length < 64 || req.body.length > CAMERA_RELAY_MAX_FRAME_BYTES) {
@@ -1083,8 +1086,12 @@ app.post(
     if (!isValidJpeg(req.body)) {
       return res.status(415).json({ success: false, message: "Frame is not a structurally valid JPEG." });
     }
+    const receivedAt = Date.now();
+    if (latestRelayFrameAtMs && receivedAt - latestRelayFrameAtMs < 25) {
+      return res.status(429).json({ success: false, message: "Camera relay frame rate is above the 40 FPS safety limit." });
+    }
     latestRelayFrame = Buffer.from(req.body);
-    latestRelayFrameAtMs = Date.now();
+    latestRelayFrameAtMs = receivedAt;
     relayFrameTimes.push(latestRelayFrameAtMs);
     relayFrameTimes = relayFrameTimes.filter((t) => latestRelayFrameAtMs - t <= 2000);
     for (const client of relayStreamClients) writeRelayMjpegFrame(client, latestRelayFrame);
