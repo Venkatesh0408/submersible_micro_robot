@@ -681,6 +681,13 @@ export class Esp32CameraService {
             });
           }
 
+          // Live video streams are indefinite: disable socket timeout once stream starts
+          proxyReq.setTimeout(0);
+          if (proxyRes.socket) {
+            proxyRes.socket.setTimeout(0);
+            proxyRes.socket.setKeepAlive(true, 5000);
+          }
+
           proxyRes.pipe(clientRes);
 
           // Stream cleanup on client disconnect or response finish

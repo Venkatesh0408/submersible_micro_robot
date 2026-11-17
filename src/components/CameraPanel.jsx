@@ -49,6 +49,7 @@ export default function CameraPanel() {
   const [connectionState, setConnectionState] = useState("Disconnected"); // "Connected" | "Connecting" | "Disconnected" | "Invalid IP" | "Connection timeout"
   const [connectionMessage, setConnectionMessage] = useState("");
   const [streamKey, setStreamKey] = useState(0);
+  const [streamRetryCount, setStreamRetryCount] = useState(0);
 
   // Viewport states
   const [espConnected, setEspConnected] = useState(false);
@@ -965,10 +966,21 @@ export default function CameraPanel() {
               key={streamKey}
               src={`${streamUrl}?k=${streamKey}`}
               alt="ESP32-CAM Live Camera Stream"
+              onLoad={() => {
+                setStreamRetryCount(0);
+              }}
               onError={() => {
-                setEspConnected(false);
-                setEspLatency(null);
-                setConnectionState("Disconnected");
+                if (streamRetryCount < 3) {
+                  setStreamRetryCount((prev) => prev + 1);
+                  setTimeout(() => {
+                    setStreamKey((k) => k + 1);
+                  }, 1200);
+                } else {
+                  setEspConnected(false);
+                  setEspLatency(null);
+                  setConnectionState("Disconnected");
+                  setStreamRetryCount(0);
+                }
               }}
               style={{
                 width: "100%",
@@ -1074,6 +1086,17 @@ export default function CameraPanel() {
             style={{ color: "#22d3ee", borderColor: "#22d3ee" }}
           >
             {capturingSnapshot ? <Loader2 size={13} className="animate-spin" /> : <Camera size={13} />} Snap
+          </button>
+          <button
+            className="hud-control-btn"
+            onClick={() => {
+              setStreamKey((k) => k + 1);
+              setStatusNotice("Refreshing camera stream...");
+              setTimeout(() => setStatusNotice(""), 2000);
+            }}
+            title="Reload Video Stream"
+          >
+            <RefreshCw size={13} /> Reload
           </button>
           <button
             className="hud-control-btn"
