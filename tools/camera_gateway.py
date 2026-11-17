@@ -16,7 +16,7 @@ except ImportError:
     HAVE_REQUESTS = False
 
 DEFAULT_SERVER = "https://submersible-micro-robot.onrender.com"
-DEFAULT_CAMERA = "http://192.168.4.10:81/stream"
+DEFAULT_CAMERA = "http://192.168.4.1:81/stream"
 MAX_FRAME_BYTES = 512 * 1024
 
 
