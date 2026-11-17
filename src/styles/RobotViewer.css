@@ -206,83 +206,29 @@
     .rv-spin { animation-duration: 1.6s; }
 }
 
-/* ---- Cinematic Assembly Video Player ---- */
+/* ---- Cinematic Fullscreen Assembly Video Player with Auto-Transition ---- */
 .rv-video-wrap {
     position: absolute;
     inset: 0;
+    width: 100%;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #030712;
-    z-index: 2;
+    background: #000;
+    z-index: 10;
+    opacity: 1;
+    transition: opacity 0.8s ease-in-out;
+}
+
+.rv-video-wrap.is-fading {
+    opacity: 0;
+    pointer-events: none;
 }
 
 .rv-video-element {
     width: 100%;
     height: 100%;
-    max-height: calc(100vh - 180px);
     object-fit: contain;
     background: #000;
-    cursor: pointer;
-}
-
-.rv-video-overlay-ended {
-    position: absolute;
-    inset: 0;
-    background: rgba(3, 7, 18, 0.65);
-    backdrop-filter: blur(4px);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    z-index: 5;
-    animation: rv-fadein 0.4s ease;
-}
-
-.rv-video-badge-done {
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    color: #38bdf8;
-    background: rgba(14, 165, 233, 0.15);
-    border: 1px solid rgba(14, 165, 233, 0.4);
-    padding: 8px 18px;
-    border-radius: 999px;
-    text-transform: uppercase;
-    box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
-}
-
-.rv-video-timeline-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    min-width: 180px;
-    max-width: 320px;
-    padding: 0 4px;
-}
-
-.rv-video-timeline {
-    flex: 1;
-    height: 6px;
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 3px;
-    cursor: pointer;
-    position: relative;
-    overflow: hidden;
-}
-
-.rv-video-timeline-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #0284c7, #22d3ee);
-    border-radius: 3px;
-    transition: width 0.1s linear;
-}
-
-.rv-video-time {
-    font-size: 11px;
-    font-family: monospace;
-    color: #94a3b8;
-    white-space: nowrap;
 }

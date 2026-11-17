@@ -7,7 +7,7 @@ import {
 import { useReducedMotion } from "framer-motion";
 import {
     Boxes, Box as BoxIcon, RotateCcw, RefreshCw, MousePointer2,
-    X, TriangleAlert, Play, Pause, Volume2, VolumeX, Maximize2, Minimize2, Film
+    X, TriangleAlert, Play, Pause
 } from "lucide-react";
 import * as THREE from "three";
 import "../styles/RobotViewer.css";
@@ -22,13 +22,6 @@ useGLTF.preload(ASSEMBLED_URL, DRACO);
 useGLTF.preload(EXPLODED_URL, DRACO);
 
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-
-function formatTime(sec) {
-    if (isNaN(sec) || sec < 0) return "0:00";
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s < 10 ? "0" : ""}${s}`;
-}
 
 function hasWebGL() {
     try {
@@ -190,16 +183,32 @@ export default function RobotViewer() {
     const [autoRotateOn, setAutoRotateOn] = useState(!reduce);
     const [isAutoAnimating, setIsAutoAnimating] = useState(false);
 
-    // Video Player State (Replaces the floating model with the actual assembly video)
-    const [viewMode, setViewMode] = useState("video"); // "video" | "3d"
+    // Video Player & Auto-Transition State
+    const [isVideoActive, setIsVideoActive] = useState(true);
+    const [isFading, setIsFading] = useState(false);
     const videoRef = useRef(null);
     const stageRef = useRef(null);
-    const [isPlaying, setIsPlaying] = useState(true);
-    const [isCompleted, setIsCompleted] = useState(false);
-    const [isMuted, setIsMuted] = useState(true);
-    const [currentTime, setCurrentTime] = useState(0);
-    const [duration, setDuration] = useState(0);
-    const [isFullscreen, setIsFullscreen] = useState(false);
+
+    // Auto-transition into 3D Orbit when assembly video completes
+    const handleVideoEnded = useCallback(() => {
+        setIsFading(true);
+        setTimeout(() => {
+            setIsVideoActive(false);
+            setIsFading(false);
+        }, 800);
+    }, []);
+
+    // Rewatch assembly video from the start
+    const handleRewatch = useCallback(() => {
+        setIsVideoActive(true);
+        setIsFading(false);
+        setTimeout(() => {
+            if (videoRef.current) {
+                videoRef.current.currentTime = 0;
+                videoRef.current.play().catch(() => {});
+            }
+        }, 50);
+    }, []);
 
     useEffect(() => {
         if (!isAutoAnimating) return;
@@ -265,259 +274,109 @@ export default function RobotViewer() {
         setResetKey((k) => k + 1);
     }, []);
 
-    // Video actions: Rewatch, Play/Pause, Seek, Fullscreen
-    const handleRewatch = useCallback(() => {
-        if (videoRef.current) {
-            videoRef.current.currentTime = 0;
-            videoRef.current.play().then(() => {
-                setIsPlaying(true);
-                setIsCompleted(false);
-            }).catch(() => {});
-        }
-    }, []);
-
-    const handleTogglePlay = useCallback(() => {
-        if (!videoRef.current) return;
-        if (isPlaying) {
-            videoRef.current.pause();
-            setIsPlaying(false);
-        } else {
-            if (isCompleted) {
-                videoRef.current.currentTime = 0;
-            }
-            videoRef.current.play().then(() => {
-                setIsPlaying(true);
-                setIsCompleted(false);
-            }).catch(() => {});
-        }
-    }, [isPlaying, isCompleted]);
-
-    const handleVideoEnded = useCallback(() => {
-        setIsPlaying(false);
-        setIsCompleted(true);
-    }, []);
-
-    const handleTimeUpdate = useCallback(() => {
-        if (!videoRef.current) return;
-        setCurrentTime(videoRef.current.currentTime);
-        if (videoRef.current.duration && !isNaN(videoRef.current.duration)) {
-            setDuration(videoRef.current.duration);
-        }
-    }, []);
-
-    const handleSeek = useCallback((e) => {
-        if (!videoRef.current || !duration) return;
-        const rect = e.currentTarget.getBoundingClientRect();
-        const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        videoRef.current.currentTime = pos * duration;
-    }, [duration]);
-
-    const toggleFullscreen = useCallback(() => {
-        if (!stageRef.current) return;
-        if (!document.fullscreenElement) {
-            stageRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
-        } else {
-            document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
-        }
-    }, []);
-
     const effectiveAutoRotate = autoRotateOn && !interacting && !reduce;
 
     return (
         <div className="rv">
             <div className="rv-stage" ref={stageRef}>
-                {viewMode === "video" ? (
-                    <div className="rv-video-wrap">
+                {/* 1. Cinematic Fullscreen Assembly Video with Auto-Transition */}
+                {isVideoActive && (
+                    <div className={`rv-video-wrap${isFading ? " is-fading" : ""}`}>
                         <video
                             ref={videoRef}
                             src={VIDEO_URL}
                             playsInline
                             autoPlay
-                            muted={isMuted}
+                            muted
                             onEnded={handleVideoEnded}
-                            onTimeUpdate={handleTimeUpdate}
-                            onLoadedMetadata={handleTimeUpdate}
-                            onPlay={() => { setIsPlaying(true); setIsCompleted(false); }}
-                            onPause={() => setIsPlaying(false)}
                             className="rv-video-element"
-                            onClick={handleTogglePlay}
                         />
+                    </div>
+                )}
 
-                        {isCompleted && (
-                            <div className="rv-video-overlay-ended">
-                                <span className="rv-video-badge-done">
-                                    ✓ Robot Assembly Complete
-                                </span>
-                                <button
-                                    type="button"
-                                    className="rv-btn rv-btn--primary"
-                                    onClick={handleRewatch}
-                                    style={{ padding: "12px 24px", fontSize: "15px", gap: "10px" }}
-                                >
-                                    <RotateCcw size={18} /> Rewatch Assembly
-                                </button>
+                {/* 2. Interactive 3D Model Orbit Canvas */}
+                {!webgl ? (
+                    <Fallback />
+                ) : (
+                    <GLBoundary fallback={<Fallback />}>
+                        <div className={`rv-canvas-wrap${ready ? " is-ready" : ""}`}>
+                            <Canvas
+                                frameloop={frameloop}
+                                shadows={false}
+                                dpr={[1, 2]}
+                                gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+                                camera={{ position: [1.15, 0.72, 1.55], fov: 40, near: 0.01, far: 100 }}
+                                onCreated={({ gl }) => { gl.toneMapping = THREE.ACESFilmicToneMapping; gl.toneMappingExposure = 1.08; }}
+                            >
+                                <Scene
+                                    exploded={exploded} resetKey={resetKey} autoRotate={effectiveAutoRotate}
+                                    reduce={reduce} isMobile={isMobile} controlsRef={controlsRef}
+                                    onInteractStart={onInteractStart} onInteractEnd={onInteractEnd}
+                                />
+                            </Canvas>
+                        </div>
+
+                        {!ready && (
+                            <div className="rv-loading" aria-live="polite">
+                                <span className="rv-spin" />
+                                <p>Loading 3D model… <b>{Math.round(progress)}%</b></p>
                             </div>
                         )}
 
-                        <div className="rv-statelabel">
-                            <span>{isCompleted ? "Assembled View — Final Robot Showcase" : "3D Robot Assembly Animation"}</span>
-                            {isCompleted && (
-                                <span className="rv-auto-badge" style={{ background: "rgba(34, 197, 94, 0.2)", color: "#22c55e" }}>
-                                    ● Complete
-                                </span>
-                            )}
+                        <div className={`rv-statelabel${exploded ? " is-exploded" : ""}`}>
+                            <span>{exploded ? "Disassembled view — components separated" : "Assembled view"}</span>
+                            {isAutoAnimating && <span className="rv-auto-badge">● Animated Tour</span>}
                         </div>
+
+                        {hint && ready && !isVideoActive && (
+                            <button type="button" className="rv-hint" onClick={() => setHint(false)}>
+                                <MousePointer2 size={13} /> Drag to rotate · Scroll to zoom
+                                <X size={13} className="rv-hint__x" />
+                            </button>
+                        )}
 
                         <div className="rv-controls">
                             <button
                                 type="button"
-                                className="rv-btn"
-                                onClick={handleTogglePlay}
-                                title={isPlaying ? "Pause video" : "Play video"}
-                            >
-                                {isPlaying ? <Pause size={15} /> : <Play size={15} />}
-                                {isPlaying ? "Pause" : "Play"}
-                            </button>
-
-                            <button
-                                type="button"
                                 className="rv-btn rv-btn--primary"
                                 onClick={handleRewatch}
-                                title="Rewatch assembly from the start"
+                                title="Rewatch assembly video"
                             >
                                 <RotateCcw size={15} /> Rewatch Assembly
                             </button>
-
-                            <div className="rv-video-timeline-wrap">
-                                <span className="rv-video-time">{formatTime(currentTime)}</span>
-                                <div className="rv-video-timeline" onClick={handleSeek} title="Seek video position">
-                                    <div
-                                        className="rv-video-timeline-fill"
-                                        style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
-                                    />
-                                </div>
-                                <span className="rv-video-time">{formatTime(duration)}</span>
-                            </div>
-
                             <button
                                 type="button"
-                                className="rv-btn"
-                                onClick={() => setIsMuted((m) => !m)}
-                                title={isMuted ? "Unmute audio" : "Mute audio"}
+                                className={`rv-btn${isAutoAnimating ? " is-on" : ""}`}
+                                onClick={toggleAutoAnimate}
+                                aria-pressed={isAutoAnimating}
+                                title={isAutoAnimating ? "Pause automated animation" : "Play cinematic assembly / disassembly animation"}
                             >
-                                {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                                {isAutoAnimating ? <Pause size={15} /> : <Play size={15} />}
+                                {isAutoAnimating ? "Pause Animation" : "Animate"}
                             </button>
-
-                            <button
-                                type="button"
-                                className="rv-btn"
-                                onClick={toggleFullscreen}
-                                title="Toggle fullscreen"
-                            >
-                                {isFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                            <button type="button" className="rv-btn" onClick={() => { setIsAutoAnimating(false); setExploded((v) => !v); }}>
+                                {exploded ? <BoxIcon size={16} /> : <Boxes size={16} />}
+                                {exploded ? "Reassemble" : "Disassemble"}
                             </button>
-
+                            <button type="button" className="rv-btn" onClick={resetView}>
+                                <RotateCcw size={15} /> Reset view
+                            </button>
                             <button
                                 type="button"
-                                className="rv-btn"
-                                onClick={() => {
-                                    if (videoRef.current) videoRef.current.pause();
-                                    setViewMode("3d");
-                                }}
-                                title="Switch to interactive 3D model orbit"
+                                className={`rv-btn${autoRotateOn ? " is-on" : ""}`}
+                                onClick={() => setAutoRotateOn((v) => !v)}
+                                aria-pressed={autoRotateOn}
                             >
-                                <Boxes size={15} /> Switch to 3D Orbit
+                                <RefreshCw size={15} /> Auto-rotate
                             </button>
                         </div>
-                    </div>
-                ) : (
-                    /* 3D Model Mode */
-                    !webgl ? (
-                        <Fallback />
-                    ) : (
-                        <GLBoundary fallback={<Fallback />}>
-                            <div className={`rv-canvas-wrap${ready ? " is-ready" : ""}`}>
-                                <Canvas
-                                    frameloop={frameloop}
-                                    shadows={false}
-                                    dpr={[1, 2]}
-                                    gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-                                    camera={{ position: [1.15, 0.72, 1.55], fov: 40, near: 0.01, far: 100 }}
-                                    onCreated={({ gl }) => { gl.toneMapping = THREE.ACESFilmicToneMapping; gl.toneMappingExposure = 1.08; }}
-                                >
-                                    <Scene
-                                        exploded={exploded} resetKey={resetKey} autoRotate={effectiveAutoRotate}
-                                        reduce={reduce} isMobile={isMobile} controlsRef={controlsRef}
-                                        onInteractStart={onInteractStart} onInteractEnd={onInteractEnd}
-                                    />
-                                </Canvas>
-                            </div>
-
-                            {!ready && (
-                                <div className="rv-loading" aria-live="polite">
-                                    <span className="rv-spin" />
-                                    <p>Loading 3D model… <b>{Math.round(progress)}%</b></p>
-                                </div>
-                            )}
-
-                            <div className={`rv-statelabel${exploded ? " is-exploded" : ""}`}>
-                                <span>{exploded ? "Disassembled view — components separated" : "Assembled view"}</span>
-                                {isAutoAnimating && <span className="rv-auto-badge">● Animated Tour</span>}
-                            </div>
-
-                            {hint && ready && (
-                                <button type="button" className="rv-hint" onClick={() => setHint(false)}>
-                                    <MousePointer2 size={13} /> Drag to rotate · Scroll to zoom
-                                    <X size={13} className="rv-hint__x" />
-                                </button>
-                            )}
-
-                            <div className="rv-controls">
-                                <button
-                                    type="button"
-                                    className="rv-btn rv-btn--primary"
-                                    onClick={() => {
-                                        setViewMode("video");
-                                        setTimeout(handleRewatch, 50);
-                                    }}
-                                    title="Watch Cinematic Robot Assembly Video"
-                                >
-                                    <Film size={15} /> Watch Assembly Video
-                                </button>
-                                <button
-                                    type="button"
-                                    className={`rv-btn${isAutoAnimating ? " is-on" : ""}`}
-                                    onClick={toggleAutoAnimate}
-                                    aria-pressed={isAutoAnimating}
-                                    title={isAutoAnimating ? "Pause automated animation" : "Play cinematic assembly / disassembly animation"}
-                                >
-                                    {isAutoAnimating ? <Pause size={15} /> : <Play size={15} />}
-                                    {isAutoAnimating ? "Pause Animation" : "Animate"}
-                                </button>
-                                <button type="button" className="rv-btn" onClick={() => { setIsAutoAnimating(false); setExploded((v) => !v); }}>
-                                    {exploded ? <BoxIcon size={16} /> : <Boxes size={16} />}
-                                    {exploded ? "Reassemble" : "Disassemble"}
-                                </button>
-                                <button type="button" className="rv-btn" onClick={resetView}>
-                                    <RotateCcw size={15} /> Reset view
-                                </button>
-                                <button
-                                    type="button"
-                                    className={`rv-btn${autoRotateOn ? " is-on" : ""}`}
-                                    onClick={() => setAutoRotateOn((v) => !v)}
-                                    aria-pressed={autoRotateOn}
-                                >
-                                    <RefreshCw size={15} /> Auto-rotate
-                                </button>
-                            </div>
-                        </GLBoundary>
-                    )
+                    </GLBoundary>
                 )}
             </div>
 
             <p className="rv-caption">
-                {viewMode === "video"
-                    ? "VSTY Submersible Micro Robot — Actual Cinematic Assembly Video"
+                {isVideoActive
+                    ? "VSTY Submersible Micro Robot — Assembly Video"
                     : "Interactive 3D model of our hardware. Drag to orbit, scroll to zoom."}
             </p>
         </div>
