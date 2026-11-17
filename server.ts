@@ -1089,8 +1089,8 @@ app.post(
       return res.status(415).json({ success: false, message: "Frame is not a structurally valid JPEG." });
     }
     const receivedAt = Date.now();
-    if (latestRelayFrameAtMs && receivedAt - latestRelayFrameAtMs < 25) {
-      return res.status(429).json({ success: false, message: "Camera relay frame rate is above the 40 FPS safety limit." });
+    if (latestRelayFrameAtMs && receivedAt - latestRelayFrameAtMs < 15) {
+      return res.status(429).json({ success: false, message: "Camera relay frame rate is above the 60 FPS safety limit." });
     }
     latestRelayFrame = Buffer.from(req.body);
     latestRelayFrameAtMs = receivedAt;
