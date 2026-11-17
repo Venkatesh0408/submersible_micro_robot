@@ -5,8 +5,8 @@ import TopNav from "../components/TopNav";
 import RobotViewer from "../components/RobotViewer";
 import "../styles/ModelViewerPage.css";
 
-const TITLE = "View 3D Model — VSTY Submersible Micro Robot";
-const DESC = "Interactive 3D model of the VSTY Submersible Micro Robot — inspect assembled and exploded hardware views with cinematic animation.";
+const TITLE = "Robot Assembly & 3D Model — VSTY Submersible Micro Robot";
+const DESC = "Actual assembly video and interactive 3D model of the VSTY Submersible Micro Robot — inspect assembled and exploded hardware views.";
 
 export default function ModelViewerPage() {
     useEffect(() => {
@@ -37,7 +37,7 @@ export default function ModelViewerPage() {
                 </Link>
                 <div className="mvp-heading">
                     <span className="mvp-kicker">Hardware Visualization</span>
-                    <h1 className="mvp-title">VSTY Submersible Micro Robot — 3D Model</h1>
+                    <h1 className="mvp-title">VSTY Submersible Micro Robot — Assembly Video & 3D Model</h1>
                 </div>
                 <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "8px" }}>
                     <span style={{
@@ -52,7 +52,7 @@ export default function ModelViewerPage() {
                         alignItems: "center",
                         gap: "6px"
                     }}>
-                        <Box size={14} /> Interactive Hardware Mesh
+                        <Box size={14} /> Assembly Video & 3D Mesh
                     </span>
                 </div>
             </div>

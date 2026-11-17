@@ -44,12 +44,12 @@
 // 1. WI-FI CONFIGURATION
 // ============================================================================
 // Replace with your 2.4 GHz Wi-Fi Router or Phone Hotspot credentials:
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* WIFI_SSID     = "GalayxA14";
+const char* WIFI_PASSWORD = "987654321";
 
 // Wi-Fi Access Point fallback (used when router/hotspot is unreachable)
 const char* AP_SSID       = "VSTY-ROBOT-CAM";
-const char* AP_PASSWORD   = "submersible123"; // Minimum 8 characters
+const char* AP_PASSWORD   = "vsty@123"; // Minimum 8 characters
 
 // Maximum connection attempts before falling back to SoftAP (30 * 500ms = 15s)
 #define WIFI_MAX_ATTEMPTS 30

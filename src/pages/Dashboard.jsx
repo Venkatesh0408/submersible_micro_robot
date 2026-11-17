@@ -79,27 +79,27 @@ export default function Dashboard() {
                 {/* MISSION REPORT COMPACT CARD */}
                 <MissionReportColumn />
 
-                {/* VIEW 3D MODEL CARD */}
+                {/* VIEW 3D MODEL & ASSEMBLY CARD */}
                 <div
                     className="system-card"
                     style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
                     onClick={() => navigate("/model")}
                 >
                     <div className="system-icon">
-                        📦
+                        🎬
                     </div>
                     <h2>
-                        View 3D Model
+                        View 3D Model & Assembly
                     </h2>
                     <p>
-                        Interactive 3D model of our hardware. Inspect assembled and exploded views with cinematic animation.
+                        Watch the actual robot assembly video and inspect the 3D hardware model with interactive orbit and exploded views.
                     </p>
                     <div className="system-info">
-                        <span>Format : GLB</span>
-                        <span>Interactive : 3D</span>
+                        <span>Video : Assembly MP4</span>
+                        <span>3D Mesh : GLB</span>
                     </div>
                     <button style={{ marginTop: 'auto' }}>
-                        VIEW 3D MODEL →
+                        WATCH ASSEMBLY & 3D MODEL →
                     </button>
                 </div>
 

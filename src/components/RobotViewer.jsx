@@ -5,10 +5,14 @@ import {
     useGLTF, useProgress, AdaptiveDpr, AdaptiveEvents,
 } from "@react-three/drei";
 import { useReducedMotion } from "framer-motion";
-import { Boxes, Box as BoxIcon, RotateCcw, RefreshCw, MousePointer2, X, TriangleAlert, Play, Pause } from "lucide-react";
+import {
+    Boxes, Box as BoxIcon, RotateCcw, RefreshCw, MousePointer2,
+    X, TriangleAlert, Play, Pause, Volume2, VolumeX, Maximize2, Minimize2, Film
+} from "lucide-react";
 import * as THREE from "three";
 import "../styles/RobotViewer.css";
 
+const VIDEO_URL = "/videos/robot-assembly.mp4";
 const ASSEMBLED_URL = "/models/robot-assembled.glb";
 const EXPLODED_URL = "/models/robot-exploded.glb";
 const DRACO = "/draco/"; // self-hosted decoder, no CDN
@@ -18,6 +22,13 @@ useGLTF.preload(ASSEMBLED_URL, DRACO);
 useGLTF.preload(EXPLODED_URL, DRACO);
 
 const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+function formatTime(sec) {
+    if (isNaN(sec) || sec < 0) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+}
 
 function hasWebGL() {
     try {
@@ -60,61 +71,51 @@ function Model({ url, active }) {
     return <primitive object={scene} />;
 }
 
-// Frames the model on load / reset, and eases a subtle dolly-out on disassemble ("opens up").
-// The model auto-rotates around Y, so its vertical extent is constant — we frame tight to the
-// height and the widest horizontal span (max of x/z), adaptive to the canvas aspect ratio.
+// Camera framing animator: whenever exploded flips, glide between tight and exploded shot.
 function Framing({ exploded, resetKey, reduce }) {
-    const camera = useThree((s) => s.camera);
-    const controls = useThree((s) => s.controls);
-    const size = useThree((s) => s.size);
-    const { scene } = useGLTF(ASSEMBLED_URL, DRACO); // both models share ~the same extent
+    const { camera, controls } = useThree();
     const anim = useRef(null);
-    const baseDist = useRef(0);
 
-    const fit = useCallback(() => {
-        const box = new THREE.Box3().setFromObject(scene);
-        const s = box.getSize(new THREE.Vector3());
-        const center = box.getCenter(new THREE.Vector3());
-        const fov = (camera.fov * Math.PI) / 180;
-        const aspect = camera.aspect || (size.width / Math.max(1, size.height)) || 1.6;
-        const distH = (s.y / 2) / Math.tan(fov / 2);
-        const distW = (Math.max(s.x, s.z) / 2) / (Math.tan(fov / 2) * aspect);
-        return { dist: Math.max(distH, distW) * 1.6, center };
-    }, [scene, camera, size]);
+    const ASSEMBLED_SHOT = useRef({
+        target: new THREE.Vector3(0, 0.16, 0),
+        cam: new THREE.Vector3(0.95, 0.58, 1.3),
+    });
+    const EXPLODED_SHOT = useRef({
+        target: new THREE.Vector3(0, 0.22, 0),
+        cam: new THREE.Vector3(1.4, 0.95, 1.95),
+    });
 
-    const flyTo = useCallback((toDist, snap) => {
+    const triggerFly = useCallback((toShot, duration = 1.05) => {
         if (!controls) return;
-        const { center } = fit();
-        const fromDir = camera.position.clone().sub(controls.target);
-        if (fromDir.lengthSq() < 1e-6) fromDir.set(1.15, 0.72, 1.55);
+        if (reduce) {
+            controls.target.copy(toShot.target);
+            camera.position.copy(toShot.cam);
+            controls.update();
+            return;
+        }
         anim.current = {
-            t: 0, dur: snap || reduce ? 0.0001 : 0.95,
-            fromT: controls.target.clone(), toT: center.clone(),
+            t: 0,
+            dur: duration,
+            fromT: controls.target.clone(),
+            toT: toShot.target.clone(),
             fromC: camera.position.clone(),
-            toC: center.clone().add(fromDir.setLength(toDist)),
+            toC: toShot.cam.clone(),
         };
-    }, [controls, camera, fit, reduce]);
+    }, [camera, controls, reduce]);
 
-    // Animated fit on mount + reset (a gentle establishing push-in).
     useEffect(() => {
         if (!controls) return;
-        const { dist } = fit();
-        baseDist.current = dist;
-        flyTo(dist * (exploded ? 1.1 : 1), false);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [controls, resetKey]);
+        triggerFly(exploded ? EXPLODED_SHOT.current : ASSEMBLED_SHOT.current, 0.95);
+    }, [exploded, triggerFly, controls]);
 
-    // Subtle dolly on disassemble/reassemble.
     useEffect(() => {
-        if (!controls || !baseDist.current) return;
-        const cur = camera.position.distanceTo(controls.target);
-        flyTo(cur * (exploded ? 1.1 : 1 / 1.1), false);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [exploded]);
+        if (!controls || resetKey === 0) return;
+        triggerFly(exploded ? EXPLODED_SHOT.current : ASSEMBLED_SHOT.current, 0.65);
+    }, [resetKey, exploded, triggerFly, controls]);
 
-    useFrame((state, delta) => {
+    useFrame((_, delta) => {
+        if (!anim.current || !controls) return;
         const a = anim.current;
-        if (!a || !controls) return;
         a.t = Math.min(1, a.t + delta / a.dur);
         const e = easeInOut(a.t);
         controls.target.lerpVectors(a.fromT, a.toT, e);
@@ -133,7 +134,6 @@ function Scene({ exploded, resetKey, autoRotate, reduce, isMobile, controlsRef, 
             <directionalLight position={[4, 6, 3]} intensity={1.25} />
             <directionalLight position={[-4, 2, -3]} intensity={0.45} color="#8bb6ff" />
 
-            {/* Procedural studio env map (no external HDRI — self-contained, offline-safe). */}
             <Environment resolution={256} frames={1}>
                 <Lightformer intensity={2.2} position={[0, 4, -3]} scale={[10, 6, 1]} color="#cfeaff" />
                 <Lightformer intensity={1.1} position={[-5, 2, 2]} scale={[6, 6, 1]} color="#7fb4ff" />
@@ -190,6 +190,17 @@ export default function RobotViewer() {
     const [autoRotateOn, setAutoRotateOn] = useState(!reduce);
     const [isAutoAnimating, setIsAutoAnimating] = useState(false);
 
+    // Video Player State (Replaces the floating model with the actual assembly video)
+    const [viewMode, setViewMode] = useState("video"); // "video" | "3d"
+    const videoRef = useRef(null);
+    const stageRef = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(true);
+    const [isCompleted, setIsCompleted] = useState(false);
+    const [isMuted, setIsMuted] = useState(true);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+    const [isFullscreen, setIsFullscreen] = useState(false);
+
     useEffect(() => {
         if (!isAutoAnimating) return;
         const timer = setInterval(() => {
@@ -207,6 +218,7 @@ export default function RobotViewer() {
             return next;
         });
     }, []);
+
     const [interacting, setInteracting] = useState(false);
     const [resetKey, setResetKey] = useState(0);
     const [hint, setHint] = useState(true);
@@ -220,14 +232,12 @@ export default function RobotViewer() {
     useEffect(() => setAutoRotateOn(!reduce), [reduce]);
     useEffect(() => setIsMobile(window.matchMedia("(pointer: coarse), (max-width: 640px)").matches), []);
 
-    // Pause the render loop while the tab is hidden (saves battery/CPU in a background tab).
     useEffect(() => {
         const onVis = () => setFrameloop(document.hidden ? "never" : "always");
         document.addEventListener("visibilitychange", onVis);
         return () => document.removeEventListener("visibilitychange", onVis);
     }, []);
 
-    // Free GPU memory + GLTF cache when leaving the page.
     useEffect(() => () => {
         clearTimeout(idleTimer.current);
         useGLTF.clear([ASSEMBLED_URL, EXPLODED_URL]);
@@ -238,12 +248,12 @@ export default function RobotViewer() {
         clearTimeout(idleTimer.current);
         setInteracting(true);
     }, []);
+
     const onInteractEnd = useCallback(() => {
         clearTimeout(idleTimer.current);
         idleTimer.current = setTimeout(() => setInteracting(false), 2500);
     }, []);
 
-    // Auto-hide the hint after a few seconds even without interaction.
     useEffect(() => {
         if (!hint) return;
         const t = setTimeout(() => setHint(false), 5000);
@@ -255,83 +265,261 @@ export default function RobotViewer() {
         setResetKey((k) => k + 1);
     }, []);
 
+    // Video actions: Rewatch, Play/Pause, Seek, Fullscreen
+    const handleRewatch = useCallback(() => {
+        if (videoRef.current) {
+            videoRef.current.currentTime = 0;
+            videoRef.current.play().then(() => {
+                setIsPlaying(true);
+                setIsCompleted(false);
+            }).catch(() => {});
+        }
+    }, []);
+
+    const handleTogglePlay = useCallback(() => {
+        if (!videoRef.current) return;
+        if (isPlaying) {
+            videoRef.current.pause();
+            setIsPlaying(false);
+        } else {
+            if (isCompleted) {
+                videoRef.current.currentTime = 0;
+            }
+            videoRef.current.play().then(() => {
+                setIsPlaying(true);
+                setIsCompleted(false);
+            }).catch(() => {});
+        }
+    }, [isPlaying, isCompleted]);
+
+    const handleVideoEnded = useCallback(() => {
+        setIsPlaying(false);
+        setIsCompleted(true);
+    }, []);
+
+    const handleTimeUpdate = useCallback(() => {
+        if (!videoRef.current) return;
+        setCurrentTime(videoRef.current.currentTime);
+        if (videoRef.current.duration && !isNaN(videoRef.current.duration)) {
+            setDuration(videoRef.current.duration);
+        }
+    }, []);
+
+    const handleSeek = useCallback((e) => {
+        if (!videoRef.current || !duration) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        videoRef.current.currentTime = pos * duration;
+    }, [duration]);
+
+    const toggleFullscreen = useCallback(() => {
+        if (!stageRef.current) return;
+        if (!document.fullscreenElement) {
+            stageRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+        } else {
+            document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+        }
+    }, []);
+
     const effectiveAutoRotate = autoRotateOn && !interacting && !reduce;
 
     return (
         <div className="rv">
-            <div className="rv-stage">
-                {!webgl ? (
-                    <Fallback />
-                ) : (
-                    <GLBoundary fallback={<Fallback />}>
-                        <div className={`rv-canvas-wrap${ready ? " is-ready" : ""}`}>
-                            <Canvas
-                                frameloop={frameloop}
-                                shadows={false}
-                                dpr={[1, 2]}
-                                gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-                                camera={{ position: [1.15, 0.72, 1.55], fov: 40, near: 0.01, far: 100 }}
-                                onCreated={({ gl }) => { gl.toneMapping = THREE.ACESFilmicToneMapping; gl.toneMappingExposure = 1.08; }}
-                            >
-                                <Scene
-                                    exploded={exploded} resetKey={resetKey} autoRotate={effectiveAutoRotate}
-                                    reduce={reduce} isMobile={isMobile} controlsRef={controlsRef}
-                                    onInteractStart={onInteractStart} onInteractEnd={onInteractEnd}
-                                />
-                            </Canvas>
-                        </div>
+            <div className="rv-stage" ref={stageRef}>
+                {viewMode === "video" ? (
+                    <div className="rv-video-wrap">
+                        <video
+                            ref={videoRef}
+                            src={VIDEO_URL}
+                            playsInline
+                            autoPlay
+                            muted={isMuted}
+                            onEnded={handleVideoEnded}
+                            onTimeUpdate={handleTimeUpdate}
+                            onLoadedMetadata={handleTimeUpdate}
+                            onPlay={() => { setIsPlaying(true); setIsCompleted(false); }}
+                            onPause={() => setIsPlaying(false)}
+                            className="rv-video-element"
+                            onClick={handleTogglePlay}
+                        />
 
-                        {!ready && (
-                            <div className="rv-loading" aria-live="polite">
-                                <span className="rv-spin" />
-                                <p>Loading 3D model… <b>{Math.round(progress)}%</b></p>
+                        {isCompleted && (
+                            <div className="rv-video-overlay-ended">
+                                <span className="rv-video-badge-done">
+                                    ✓ Robot Assembly Complete
+                                </span>
+                                <button
+                                    type="button"
+                                    className="rv-btn rv-btn--primary"
+                                    onClick={handleRewatch}
+                                    style={{ padding: "12px 24px", fontSize: "15px", gap: "10px" }}
+                                >
+                                    <RotateCcw size={18} /> Rewatch Assembly
+                                </button>
                             </div>
                         )}
 
-                        <div className={`rv-statelabel${exploded ? " is-exploded" : ""}`}>
-                            <span>{exploded ? "Disassembled view — components separated" : "Assembled view"}</span>
-                            {isAutoAnimating && <span className="rv-auto-badge">● Animated Tour</span>}
+                        <div className="rv-statelabel">
+                            <span>{isCompleted ? "Assembled View — Final Robot Showcase" : "3D Robot Assembly Animation"}</span>
+                            {isCompleted && (
+                                <span className="rv-auto-badge" style={{ background: "rgba(34, 197, 94, 0.2)", color: "#22c55e" }}>
+                                    ● Complete
+                                </span>
+                            )}
                         </div>
-
-                        {hint && ready && (
-                            <button type="button" className="rv-hint" onClick={() => setHint(false)}>
-                                <MousePointer2 size={13} /> Drag to rotate · Scroll to zoom
-                                <X size={13} className="rv-hint__x" />
-                            </button>
-                        )}
 
                         <div className="rv-controls">
                             <button
                                 type="button"
-                                className={`rv-btn${isAutoAnimating ? " is-on" : ""}`}
-                                onClick={toggleAutoAnimate}
-                                aria-pressed={isAutoAnimating}
-                                title={isAutoAnimating ? "Pause automated animation" : "Play cinematic assembly / disassembly animation"}
+                                className="rv-btn"
+                                onClick={handleTogglePlay}
+                                title={isPlaying ? "Pause video" : "Play video"}
                             >
-                                {isAutoAnimating ? <Pause size={15} /> : <Play size={15} />}
-                                {isAutoAnimating ? "Pause Animation" : "Animate"}
+                                {isPlaying ? <Pause size={15} /> : <Play size={15} />}
+                                {isPlaying ? "Pause" : "Play"}
                             </button>
-                            <button type="button" className="rv-btn rv-btn--primary" onClick={() => { setIsAutoAnimating(false); setExploded((v) => !v); }}>
-                                {exploded ? <BoxIcon size={16} /> : <Boxes size={16} />}
-                                {exploded ? "Reassemble" : "Disassemble"}
-                            </button>
-                            <button type="button" className="rv-btn" onClick={resetView}>
-                                <RotateCcw size={15} /> Reset view
-                            </button>
+
                             <button
                                 type="button"
-                                className={`rv-btn${autoRotateOn ? " is-on" : ""}`}
-                                onClick={() => setAutoRotateOn((v) => !v)}
-                                aria-pressed={autoRotateOn}
+                                className="rv-btn rv-btn--primary"
+                                onClick={handleRewatch}
+                                title="Rewatch assembly from the start"
                             >
-                                <RefreshCw size={15} /> Auto-rotate
+                                <RotateCcw size={15} /> Rewatch Assembly
+                            </button>
+
+                            <div className="rv-video-timeline-wrap">
+                                <span className="rv-video-time">{formatTime(currentTime)}</span>
+                                <div className="rv-video-timeline" onClick={handleSeek} title="Seek video position">
+                                    <div
+                                        className="rv-video-timeline-fill"
+                                        style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+                                    />
+                                </div>
+                                <span className="rv-video-time">{formatTime(duration)}</span>
+                            </div>
+
+                            <button
+                                type="button"
+                                className="rv-btn"
+                                onClick={() => setIsMuted((m) => !m)}
+                                title={isMuted ? "Unmute audio" : "Mute audio"}
+                            >
+                                {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                            </button>
+
+                            <button
+                                type="button"
+                                className="rv-btn"
+                                onClick={toggleFullscreen}
+                                title="Toggle fullscreen"
+                            >
+                                {isFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                            </button>
+
+                            <button
+                                type="button"
+                                className="rv-btn"
+                                onClick={() => {
+                                    if (videoRef.current) videoRef.current.pause();
+                                    setViewMode("3d");
+                                }}
+                                title="Switch to interactive 3D model orbit"
+                            >
+                                <Boxes size={15} /> Switch to 3D Orbit
                             </button>
                         </div>
-                    </GLBoundary>
+                    </div>
+                ) : (
+                    /* 3D Model Mode */
+                    !webgl ? (
+                        <Fallback />
+                    ) : (
+                        <GLBoundary fallback={<Fallback />}>
+                            <div className={`rv-canvas-wrap${ready ? " is-ready" : ""}`}>
+                                <Canvas
+                                    frameloop={frameloop}
+                                    shadows={false}
+                                    dpr={[1, 2]}
+                                    gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+                                    camera={{ position: [1.15, 0.72, 1.55], fov: 40, near: 0.01, far: 100 }}
+                                    onCreated={({ gl }) => { gl.toneMapping = THREE.ACESFilmicToneMapping; gl.toneMappingExposure = 1.08; }}
+                                >
+                                    <Scene
+                                        exploded={exploded} resetKey={resetKey} autoRotate={effectiveAutoRotate}
+                                        reduce={reduce} isMobile={isMobile} controlsRef={controlsRef}
+                                        onInteractStart={onInteractStart} onInteractEnd={onInteractEnd}
+                                    />
+                                </Canvas>
+                            </div>
+
+                            {!ready && (
+                                <div className="rv-loading" aria-live="polite">
+                                    <span className="rv-spin" />
+                                    <p>Loading 3D model… <b>{Math.round(progress)}%</b></p>
+                                </div>
+                            )}
+
+                            <div className={`rv-statelabel${exploded ? " is-exploded" : ""}`}>
+                                <span>{exploded ? "Disassembled view — components separated" : "Assembled view"}</span>
+                                {isAutoAnimating && <span className="rv-auto-badge">● Animated Tour</span>}
+                            </div>
+
+                            {hint && ready && (
+                                <button type="button" className="rv-hint" onClick={() => setHint(false)}>
+                                    <MousePointer2 size={13} /> Drag to rotate · Scroll to zoom
+                                    <X size={13} className="rv-hint__x" />
+                                </button>
+                            )}
+
+                            <div className="rv-controls">
+                                <button
+                                    type="button"
+                                    className="rv-btn rv-btn--primary"
+                                    onClick={() => {
+                                        setViewMode("video");
+                                        setTimeout(handleRewatch, 50);
+                                    }}
+                                    title="Watch Cinematic Robot Assembly Video"
+                                >
+                                    <Film size={15} /> Watch Assembly Video
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`rv-btn${isAutoAnimating ? " is-on" : ""}`}
+                                    onClick={toggleAutoAnimate}
+                                    aria-pressed={isAutoAnimating}
+                                    title={isAutoAnimating ? "Pause automated animation" : "Play cinematic assembly / disassembly animation"}
+                                >
+                                    {isAutoAnimating ? <Pause size={15} /> : <Play size={15} />}
+                                    {isAutoAnimating ? "Pause Animation" : "Animate"}
+                                </button>
+                                <button type="button" className="rv-btn" onClick={() => { setIsAutoAnimating(false); setExploded((v) => !v); }}>
+                                    {exploded ? <BoxIcon size={16} /> : <Boxes size={16} />}
+                                    {exploded ? "Reassemble" : "Disassemble"}
+                                </button>
+                                <button type="button" className="rv-btn" onClick={resetView}>
+                                    <RotateCcw size={15} /> Reset view
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`rv-btn${autoRotateOn ? " is-on" : ""}`}
+                                    onClick={() => setAutoRotateOn((v) => !v)}
+                                    aria-pressed={autoRotateOn}
+                                >
+                                    <RefreshCw size={15} /> Auto-rotate
+                                </button>
+                            </div>
+                        </GLBoundary>
+                    )
                 )}
             </div>
 
-            <p className="rv-caption">Interactive 3D model of our hardware.</p>
+            <p className="rv-caption">
+                {viewMode === "video"
+                    ? "VSTY Submersible Micro Robot — Actual Cinematic Assembly Video"
+                    : "Interactive 3D model of our hardware. Drag to orbit, scroll to zoom."}
+            </p>
         </div>
     );
 }
