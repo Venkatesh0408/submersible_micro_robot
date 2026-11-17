@@ -7,7 +7,13 @@ import sys
 import time
 from urllib.parse import urlparse
 
-import requests
+try:
+    import requests
+    HAVE_REQUESTS = True
+except ImportError:
+    import urllib.request
+    import urllib.error
+    HAVE_REQUESTS = False
 
 DEFAULT_SERVER = "https://submersible-micro-robot.onrender.com"
 DEFAULT_CAMERA = "http://192.168.4.10:81/stream"
@@ -23,9 +29,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def extract_frames(response, max_frame_bytes):
+def extract_frames(stream_iterator, max_frame_bytes):
     pending = bytearray()
-    for chunk in response.iter_content(chunk_size=8192):
+    for chunk in stream_iterator:
         if not chunk:
             continue
         pending.extend(chunk)
@@ -48,6 +54,37 @@ def extract_frames(response, max_frame_bytes):
                 yield frame
 
 
+def upload_frame_urllib(upload_url, frame, token, timeout=10):
+    req = urllib.request.Request(
+        upload_url,
+        data=frame,
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "image/jpeg",
+            "Accept": "application/json",
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as err:
+        return err.code, err.read().decode("utf-8", "ignore")
+
+
+def iter_urllib_stream(camera_url, timeout=20):
+    req = urllib.request.Request(camera_url, headers={"Accept": "*/*", "Connection": "keep-alive"})
+    with urllib.request.urlopen(req, timeout=timeout) as camera:
+        content_type = camera.headers.get("Content-Type", "")
+        if "multipart" not in content_type.lower() and "image" not in content_type.lower():
+            raise RuntimeError("Unexpected camera content type: " + content_type)
+        while True:
+            chunk = camera.read(8192)
+            if not chunk:
+                break
+            yield chunk
+
+
 def main():
     args = parse_args()
     token = os.environ.get("VSTY_AUTH_TOKEN", "").strip()
@@ -65,12 +102,6 @@ def main():
 
     server = args.server_url.rstrip("/")
     upload_url = server + "/api/camera/relay/frame"
-    session = requests.Session()
-    # Never send the Render login token to the local ESP32-CAM.
-    session.headers.update({
-        "Accept": "*/*",
-        "Connection": "keep-alive",
-    })
     frame_interval = 1.0 / args.fps
     sent = 0
     last_upload = 0.0
@@ -81,55 +112,109 @@ def main():
     print("Camera : " + args.camera_url)
     print("Render : " + server)
     print("Limit  : " + str(args.fps) + " FPS (server ceiling: 40)")
+    if not HAVE_REQUESTS:
+        print("Engine : Python standard library (urllib)")
+    else:
+        print("Engine : requests (keep-alive session)")
     print("Press Ctrl+C to stop.\n")
+
+    session = requests.Session() if HAVE_REQUESTS else None
+    if session:
+        session.headers.update({"Accept": "*/*", "Connection": "keep-alive"})
 
     while True:
         try:
             print("Connecting to ESP32-CAM stream...")
-            with session.get(args.camera_url, stream=True, timeout=(5, 20)) as camera:
-                camera.raise_for_status()
-                content_type = camera.headers.get("Content-Type", "")
-                if "multipart" not in content_type.lower() and "image" not in content_type.lower():
-                    raise RuntimeError("Unexpected camera content type: " + content_type)
+            if HAVE_REQUESTS:
+                with session.get(args.camera_url, stream=True, timeout=(5, 20)) as camera:
+                    camera.raise_for_status()
+                    content_type = camera.headers.get("Content-Type", "")
+                    if "multipart" not in content_type.lower() and "image" not in content_type.lower():
+                        raise RuntimeError("Unexpected camera content type: " + content_type)
+                    print("Camera connected. Relaying JPEG frames to Render...")
+                    for frame in extract_frames(camera.iter_content(chunk_size=8192), args.max_frame_bytes):
+                        now = time.monotonic()
+                        wait = frame_interval - (now - last_upload)
+                        if wait > 0:
+                            time.sleep(wait)
+                        try:
+                            result = session.post(
+                                upload_url,
+                                data=frame,
+                                headers={
+                                    "Authorization": "Bearer " + token,
+                                    "Content-Type": "image/jpeg",
+                                    "Accept": "application/json",
+                                },
+                                timeout=(5, 10),
+                            )
+                            status_code = result.status_code
+                            text = result.text
+                        except requests.RequestException as exc:
+                            print("Render upload failed: " + str(exc))
+                            break
+
+                        if status_code == 401:
+                            print("ERROR: Render rejected the login token (HTTP 401). Sign in again and refresh the token.")
+                            return 3
+                        if status_code == 403:
+                            print("ERROR: This login does not have operator/admin access to the camera relay.")
+                            return 3
+                        if status_code == 429:
+                            time.sleep(0.01)
+                            continue
+                        if status_code == 413:
+                            print("ERROR: Frame too large. Lower ESP32-CAM resolution or increase JPEG compression.")
+                            return 4
+                        if status_code != 202:
+                            print("Render rejected frame: HTTP " + str(status_code) + " " + text[:180])
+                            if status_code >= 500:
+                                break
+                            time.sleep(1)
+                            continue
+
+                        last_upload = time.monotonic()
+                        sent += 1
+                        report_count += 1
+                        if last_upload - last_report >= 2:
+                            measured = report_count / (last_upload - last_report)
+                            print("Relaying: " + str(round(measured, 1)) + " FPS | frame " + str(len(frame)) + " bytes")
+                            last_report = last_upload
+                            report_count = 0
+            else:
+                # Built-in urllib fallback (works without requests library)
+                stream_iter = iter_urllib_stream(args.camera_url, timeout=20)
                 print("Camera connected. Relaying JPEG frames to Render...")
-                for frame in extract_frames(camera, args.max_frame_bytes):
+                for frame in extract_frames(stream_iter, args.max_frame_bytes):
                     now = time.monotonic()
                     wait = frame_interval - (now - last_upload)
                     if wait > 0:
                         time.sleep(wait)
                     try:
-                        result = session.post(
-                            upload_url,
-                            data=frame,
-                            headers={
-                                "Authorization": "Bearer " + token,
-                                "Content-Type": "image/jpeg",
-                                "Accept": "application/json",
-                            },
-                            timeout=(5, 10),
-                        )
-                    except requests.RequestException as exc:
+                        status_code, text = upload_frame_urllib(upload_url, frame, token, timeout=10)
+                    except Exception as exc:
                         print("Render upload failed: " + str(exc))
                         break
-                    if result.status_code == 401:
+
+                    if status_code == 401:
                         print("ERROR: Render rejected the login token (HTTP 401). Sign in again and refresh the token.")
                         return 3
-                    if result.status_code == 403:
+                    if status_code == 403:
                         print("ERROR: This login does not have operator/admin access to the camera relay.")
                         return 3
-                    if result.status_code == 429:
-                        # Drop this frame and keep the stream moving; never build a backlog.
+                    if status_code == 429:
                         time.sleep(0.01)
                         continue
-                    if result.status_code == 413:
+                    if status_code == 413:
                         print("ERROR: Frame too large. Lower ESP32-CAM resolution or increase JPEG compression.")
                         return 4
-                    if result.status_code != 202:
-                        print("Render rejected frame: HTTP " + str(result.status_code) + " " + result.text[:180])
-                        if result.status_code >= 500:
+                    if status_code != 202:
+                        print("Render rejected frame: HTTP " + str(status_code) + " " + text[:180])
+                        if status_code >= 500:
                             break
                         time.sleep(1)
                         continue
+
                     last_upload = time.monotonic()
                     sent += 1
                     report_count += 1
@@ -138,14 +223,13 @@ def main():
                         print("Relaying: " + str(round(measured, 1)) + " FPS | frame " + str(len(frame)) + " bytes")
                         last_report = last_upload
                         report_count = 0
-                print("Camera stream ended. Reconnecting in 2 seconds...")
+
+            print("Camera stream ended. Reconnecting in 2 seconds...")
         except KeyboardInterrupt:
             print("\nGateway stopped. Total frames relayed: " + str(sent))
             return 0
-        except requests.RequestException as exc:
-            print("Connection error: " + str(exc))
         except Exception as exc:
-            print("Gateway error: " + str(exc))
+            print("Connection error: " + str(exc))
         time.sleep(2)
 
 
