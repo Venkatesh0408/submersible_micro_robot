@@ -208,17 +208,17 @@
 
 /* ---- Cinematic Fullscreen Assembly Video Player with Auto-Transition ---- */
 .rv-video-wrap {
-    position: absolute;
+    position: fixed;
     inset: 0;
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: 100vh;
     display: flex;
     align-items: center;
     justify-content: center;
     background: #000;
-    z-index: 10;
+    z-index: 99999;
     opacity: 1;
-    transition: opacity 0.8s ease-in-out;
+    transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .rv-video-wrap.is-fading {
@@ -227,8 +227,8 @@
 }
 
 .rv-video-element {
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: 100vh;
     object-fit: contain;
     background: #000;
 }

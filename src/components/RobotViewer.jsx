@@ -210,6 +210,16 @@ export default function RobotViewer() {
         }, 50);
     }, []);
 
+    // Allow Escape key to smoothly transition to 3D Orbit if desired
+    useEffect(() => {
+        if (!isVideoActive) return;
+        const onKey = (e) => {
+            if (e.key === "Escape") handleVideoEnded();
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [isVideoActive, handleVideoEnded]);
+
     useEffect(() => {
         if (!isAutoAnimating) return;
         const timer = setInterval(() => {
@@ -374,11 +384,11 @@ export default function RobotViewer() {
                 )}
             </div>
 
-            <p className="rv-caption">
-                {isVideoActive
-                    ? "VSTY Submersible Micro Robot — Assembly Video"
-                    : "Interactive 3D model of our hardware. Drag to orbit, scroll to zoom."}
-            </p>
+            {!isVideoActive && (
+                <p className="rv-caption">
+                    Interactive 3D model of our hardware. Drag to orbit, scroll to zoom.
+                </p>
+            )}
         </div>
     );
 }
