@@ -11,19 +11,20 @@
     flex: 1;
     min-height: 0;
     width: 100%;
-    /* Premium studio backdrop: a soft cyan-lit pool of light up top, falling to near-black. */
+    height: 100%;
+    /* Matched studio charcoal backdrop: identical to assembly video lighting */
     background:
-        radial-gradient(115% 80% at 50% 18%, #1a2f4b 0%, #0e1c30 34%, #070f1c 62%, #04060c 100%);
+        radial-gradient(95% 75% at 50% 24%, #35393d 0%, #2e3236 38%, #242528 72%, #181a1e 100%);
     overflow: hidden;
     touch-action: none; /* OrbitControls owns touch gestures — no page scroll steal */
 }
-/* Vignette to focus the eye on the model and hide the flat gradient edges. */
+/* Subtle neutral studio vignette matching video edges */
 .rv-stage::after {
     content: "";
     position: absolute;
     inset: 0;
     pointer-events: none;
-    background: radial-gradient(130% 105% at 50% 42%, transparent 52%, rgba(2, 5, 12, 0.55) 100%);
+    background: radial-gradient(125% 105% at 50% 42%, transparent 56%, rgba(16, 17, 20, 0.36) 100%);
     z-index: 1;
 }
 /* Keep the canvas below the vignette, controls/overlays above it. */
@@ -68,17 +69,17 @@
 }
 @keyframes rv-spin { to { transform: rotate(360deg); } }
 
-/* ---- state label (top-left) ---- */
+/* ---- state label (top-right, clear of floating Back button) ---- */
 .rv-statelabel {
     position: absolute;
-    top: 16px; left: 16px;
+    top: 16px; right: 16px;
     padding: 7px 12px;
     font-size: 12px; font-weight: 600;
-    color: var(--text-dim);
-    background: rgba(14, 21, 36, 0.72);
-    border: 1px solid var(--border);
+    color: #d4d8df;
+    background: rgba(24, 26, 30, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 999px;
-    backdrop-filter: blur(6px);
+    backdrop-filter: blur(8px);
     z-index: 3;
     transition: color 0.2s ease, border-color 0.2s ease;
 }
@@ -100,23 +101,23 @@
     50% { opacity: 1; }
 }
 
-/* ---- one-time hint chip (top-right) ---- */
+/* ---- one-time hint chip (below state label on top-right) ---- */
 .rv-hint {
     position: absolute;
-    top: 16px; right: 16px;
+    top: 56px; right: 16px;
     display: inline-flex; align-items: center; gap: 7px;
     padding: 7px 11px;
     font-size: 12px; font-weight: 500;
-    color: var(--text-dim);
-    background: rgba(14, 21, 36, 0.72);
-    border: 1px solid var(--border);
+    color: #d4d8df;
+    background: rgba(24, 26, 30, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 999px;
-    backdrop-filter: blur(6px);
+    backdrop-filter: blur(8px);
     cursor: pointer;
     z-index: 3;
     animation: rv-fadein 0.4s ease;
 }
-.rv-hint:hover { color: var(--text); }
+.rv-hint:hover { color: #ffffff; }
 .rv-hint__x { opacity: 0.5; margin-left: 2px; }
 @keyframes rv-fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
@@ -130,13 +131,13 @@
     align-items: center;
     gap: 10px;
     padding: 8px;
-    background: rgba(10, 16, 28, 0.78);
-    border: 1px solid var(--border);
+    background: rgba(24, 26, 30, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 16px;
     backdrop-filter: blur(10px);
     z-index: 3;
     max-width: calc(100% - 24px);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     justify-content: center;
 }
 .rv-btn {
@@ -194,11 +195,11 @@
     margin: 0;
 }
 
-@media (max-width: 640px) {
-    .rv-controls { bottom: 14px; gap: 8px; padding: 7px; }
+@media (max-width: 720px) {
+    .rv-controls { bottom: 14px; gap: 8px; padding: 7px; flex-wrap: wrap; }
     .rv-btn { height: 38px; padding: 0 12px; font-size: 13px; }
-    .rv-statelabel { top: 12px; left: 12px; }
-    .rv-hint { top: 12px; right: 12px; }
+    .rv-statelabel { top: 12px; right: 12px; }
+    .rv-hint { top: 52px; right: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -208,15 +209,16 @@
 
 /* ---- Cinematic Fullscreen Assembly Video Player with Auto-Transition ---- */
 .rv-video-wrap {
-    position: fixed;
+    position: absolute;
     inset: 0;
-    width: 100vw;
-    height: 100vh;
+    width: 100%;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #000;
-    z-index: 99999;
+    background:
+        radial-gradient(95% 75% at 50% 24%, #35393d 0%, #2e3236 38%, #242528 72%, #181a1e 100%);
+    z-index: 30;
     opacity: 1;
     transition: opacity 0.8s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -227,8 +229,15 @@
 }
 
 .rv-video-element {
-    width: 100vw;
-    height: 100vh;
-    object-fit: contain;
-    background: #000;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+    background: transparent;
+}
+
+@media (max-aspect-ratio: 4/3) {
+    .rv-video-element {
+        object-fit: contain;
+    }
 }
