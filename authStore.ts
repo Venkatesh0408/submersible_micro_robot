@@ -558,13 +558,24 @@ export class SupabaseRpcAuthStore implements AuthStoreAdapter {
     let lastBody: any = null;
 
     for (const attempt of attempts) {
-      const res = await fetch(`${this.supabaseUrl}/rest/v1/rpc/${rpcName}`, {
-        method: "POST",
-        headers: this.buildHeaders(attempt.apiKey, attempt.secret),
-        body: JSON.stringify(payload),
-      });
+      let res: Response;
+      let text = "";
+      try {
+        res = await fetch(`${this.supabaseUrl}/rest/v1/rpc/${rpcName}`, {
+          method: "POST",
+          headers: this.buildHeaders(attempt.apiKey, attempt.secret),
+          body: JSON.stringify(payload),
+        });
+        text = await res.text();
+      } catch (networkError: any) {
+        lastStatus = 503;
+        lastBody = {
+          code: "SUPABASE_UNREACHABLE",
+          message: `Could not reach database (${networkError?.message || "network error"}).`,
+        };
+        continue;
+      }
 
-      const text = await res.text();
       let parsed: any = null;
       try {
         parsed = text ? JSON.parse(text) : null;
@@ -663,6 +674,20 @@ export class SupabaseRpcAuthStore implements AuthStoreAdapter {
     if (errCode === "22023" || /username|password|phone|short|invalid/i.test(errMsg)) {
       throw new AuthError(errMsg, 400, "VALIDATION_ERROR");
     }
+    if (errCode === "SUPABASE_UNREACHABLE" || status === 503) {
+      throw new AuthError(
+        "Backend database is currently unreachable.",
+        503,
+        "BACKEND_AUTH_UNCONFIGURED"
+      );
+    }
+    if (errCode === "SUPABASE_UNREACHABLE" || status === 503) {
+      throw new AuthError(
+        "Backend database is currently unreachable.",
+        503,
+        "BACKEND_AUTH_UNCONFIGURED"
+      );
+    }
     if (errCode === "42501" && /Unauthorized backend request/i.test(errMsg)) {
       throw new AuthError(
         "Backend database authorization secret is not configured.",
@@ -705,6 +730,13 @@ export class SupabaseRpcAuthStore implements AuthStoreAdapter {
       throw new AuthError("Invalid credentials", 401, "INVALID_CREDENTIALS");
     }
 
+    if (errCode === "SUPABASE_UNREACHABLE" || status === 503) {
+      throw new AuthError(
+        "Backend database is currently unreachable.",
+        503,
+        "BACKEND_AUTH_UNCONFIGURED"
+      );
+    }
     if (errCode === "42501" && /Unauthorized backend request/i.test(errMsg)) {
       throw new AuthError(
         "Backend database authorization secret is not configured.",
@@ -736,10 +768,12 @@ function isRealDatabaseUrl(url: string | undefined): boolean {
 export class HybridCloudAuthStore implements AuthStoreAdapter {
   private readonly primary: SupabaseRpcAuthStore;
   private readonly fallbackPg: PostgresAuthStore | null;
+  private readonly fallbackFile: FileAuthStore;
 
-  constructor(primary: SupabaseRpcAuthStore, fallbackPg: PostgresAuthStore | null) {
+  constructor(primary: SupabaseRpcAuthStore, fallbackPg: PostgresAuthStore | null, fallbackFile?: FileAuthStore) {
     this.primary = primary;
     this.fallbackPg = fallbackPg;
+    this.fallbackFile = fallbackFile || new FileAuthStore();
   }
 
   get backendType(): "supabase-rpc" | "postgres" | "file" {
@@ -750,6 +784,7 @@ export class HybridCloudAuthStore implements AuthStoreAdapter {
     return {
       ...this.primary.getDiagnosticStatus(),
       postgresFallbackConfigured: Boolean(this.fallbackPg),
+      fileFallbackConfigured: true,
     };
   }
 
@@ -761,8 +796,21 @@ export class HybridCloudAuthStore implements AuthStoreAdapter {
     try {
       return await this.primary.registerUser(input);
     } catch (err: any) {
-      if (err instanceof AuthError && err.code === "BACKEND_AUTH_UNCONFIGURED" && this.fallbackPg) {
-        return await this.fallbackPg.registerUser(input);
+      const isUnreachable =
+        (err instanceof AuthError && (err.code === "BACKEND_AUTH_UNCONFIGURED" || err.status === 503 || err.code === "SUPABASE_RPC_ERROR")) ||
+        err?.name === "TypeError" ||
+        err?.code === "ENOTFOUND" ||
+        String(err?.message || "").includes("fetch failed");
+
+      if (isUnreachable) {
+        if (this.fallbackPg) {
+          try {
+            return await this.fallbackPg.registerUser(input);
+          } catch {
+            return await this.fallbackFile.registerUser(input);
+          }
+        }
+        return await this.fallbackFile.registerUser(input);
       }
       throw err;
     }
@@ -775,8 +823,21 @@ export class HybridCloudAuthStore implements AuthStoreAdapter {
     try {
       return await this.primary.authenticateUser(input);
     } catch (err: any) {
-      if (err instanceof AuthError && err.code === "BACKEND_AUTH_UNCONFIGURED" && this.fallbackPg) {
-        return await this.fallbackPg.authenticateUser(input);
+      const isUnreachable =
+        (err instanceof AuthError && (err.code === "BACKEND_AUTH_UNCONFIGURED" || err.status === 503 || err.code === "SUPABASE_RPC_ERROR")) ||
+        err?.name === "TypeError" ||
+        err?.code === "ENOTFOUND" ||
+        String(err?.message || "").includes("fetch failed");
+
+      if (isUnreachable) {
+        if (this.fallbackPg) {
+          try {
+            return await this.fallbackPg.authenticateUser(input);
+          } catch {
+            return await this.fallbackFile.authenticateUser(input);
+          }
+        }
+        return await this.fallbackFile.authenticateUser(input);
       }
       throw err;
     }
@@ -803,7 +864,7 @@ export function createDefaultAuthStore(): AuthStoreAdapter {
 
   if (isRealSupabaseUrl(supabaseUrl) && supabaseKey && !supabaseKey.includes("your-anon-key")) {
     const rpcStore = new SupabaseRpcAuthStore(supabaseUrl, supabaseKey);
-    return pgStore ? new HybridCloudAuthStore(rpcStore, pgStore) : rpcStore;
+    return new HybridCloudAuthStore(rpcStore, pgStore, new FileAuthStore());
   }
 
   if (pgStore) {
