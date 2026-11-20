@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import socket
 import sys
 import time
 from urllib.parse import urlparse
@@ -20,11 +21,23 @@ DEFAULT_CAMERA = "http://192.168.4.1:81/stream"
 MAX_FRAME_BYTES = 512 * 1024
 
 
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Relay ESP32-CAM MJPEG to the VSTY Render dashboard.")
     parser.add_argument("--camera-url", default=DEFAULT_CAMERA, help="Local ESP32-CAM MJPEG URL")
     parser.add_argument("--server-url", default=DEFAULT_SERVER, help="VSTY Render server base URL")
-    parser.add_argument("--fps", type=float, default=60.0, help="Maximum upload frame rate (default: 60; server safety ceiling: 60)")
+    parser.add_argument("--token", default=None, help="VSTY operator authentication token (or set VSTY_AUTH_TOKEN)")
+    parser.add_argument("--fps", type=float, default=30.0, help="Maximum upload frame rate (default: 30; server safety ceiling: 60)")
     parser.add_argument("--max-frame-bytes", type=int, default=MAX_FRAME_BYTES)
     return parser.parse_args()
 
@@ -97,11 +110,16 @@ def iter_camera_chunks(camera):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except Exception:
+            pass
     args = parse_args()
-    token = os.environ.get("VSTY_AUTH_TOKEN", "").strip()
+    token = (args.token or os.environ.get("VSTY_AUTH_TOKEN", "")).strip()
     if not token:
-        print("ERROR: Set VSTY_AUTH_TOKEN to your VSTY software login token first.")
-        print("Do not share this token or commit it to GitHub.")
+        print("ERROR: Set VSTY_AUTH_TOKEN or pass --token <your_token>.")
+        print("Tip: Click 'Copy Gateway Token' on your Render dashboard to get it.")
         return 2
     if args.fps <= 0 or args.fps > 60:
         print("ERROR: --fps must be greater than 0 and no more than 60.")
@@ -119,15 +137,33 @@ def main():
     last_report = time.monotonic()
     report_count = 0
 
-    print("VSTY Camera Gateway")
-    print("Camera : " + args.camera_url)
-    print("Render : " + server)
-    print("Limit  : " + str(args.fps) + " FPS (server ceiling: 60)")
+    local_ip = get_local_ip()
+    cam_host = parsed.hostname or ""
+
+    print("=" * 60)
+    print("VSTY Camera Gateway (Laptop -> Render Cloud)")
+    print("=" * 60)
+    print("Laptop IP: " + local_ip)
+    print("Camera   : " + args.camera_url)
+    print("Render   : " + server)
+    print("Limit    : " + str(args.fps) + " FPS (server ceiling: 60)")
     if not HAVE_REQUESTS:
-        print("Engine : Python standard library (urllib)")
+        print("Engine   : Python standard library (urllib)")
     else:
-        print("Engine : requests (keep-alive session)")
+        print("Engine   : requests (keep-alive session)")
     print("Press Ctrl+C to stop.\n")
+
+    if cam_host and cam_host not in ("127.0.0.1", "localhost"):
+        cam_prefix = ".".join(cam_host.split(".")[:3])
+        local_prefix = ".".join(local_ip.split(".")[:3])
+        if cam_prefix != local_prefix:
+            print("=" * 60)
+            print("[!] WARNING: Wi-Fi Subnet Mismatch Detected!")
+            print("    Your laptop IP is : " + local_ip)
+            print("    Your camera IP is : " + cam_host)
+            print("    Your laptop and ESP32 are on DIFFERENT Wi-Fi networks.")
+            print("    -> Connect your laptop's Wi-Fi to your phone hotspot ('GalayxA14').")
+            print("=" * 60 + "\n")
 
     session = requests.Session() if HAVE_REQUESTS else None
     if session:
