@@ -72,17 +72,28 @@ def upload_frame_urllib(upload_url, frame, token, timeout=10):
         return err.code, err.read().decode("utf-8", "ignore")
 
 
-def iter_urllib_stream(camera_url, timeout=20):
+def open_urllib_stream(camera_url, timeout=10):
     req = urllib.request.Request(camera_url, headers={"Accept": "*/*", "Connection": "keep-alive"})
-    with urllib.request.urlopen(req, timeout=timeout) as camera:
-        content_type = camera.headers.get("Content-Type", "")
-        if "multipart" not in content_type.lower() and "image" not in content_type.lower():
-            raise RuntimeError("Unexpected camera content type: " + content_type)
+    camera = urllib.request.urlopen(req, timeout=timeout)
+    content_type = camera.headers.get("Content-Type", "")
+    if "multipart" not in content_type.lower() and "image" not in content_type.lower():
+        camera.close()
+        raise RuntimeError("Unexpected camera content type: " + content_type)
+    return camera
+
+
+def iter_camera_chunks(camera):
+    try:
         while True:
             chunk = camera.read(8192)
             if not chunk:
                 break
             yield chunk
+    finally:
+        try:
+            camera.close()
+        except Exception:
+            pass
 
 
 def main():
@@ -183,8 +194,9 @@ def main():
                             report_count = 0
             else:
                 # Built-in urllib fallback (works without requests library)
-                stream_iter = iter_urllib_stream(args.camera_url, timeout=20)
+                camera = open_urllib_stream(args.camera_url, timeout=10)
                 print("Camera connected. Relaying JPEG frames to Render...")
+                stream_iter = iter_camera_chunks(camera)
                 for frame in extract_frames(stream_iter, args.max_frame_bytes):
                     now = time.monotonic()
                     wait = frame_interval - (now - last_upload)
@@ -230,6 +242,11 @@ def main():
             return 0
         except Exception as exc:
             print("Connection error: " + str(exc))
+            err_str = str(exc).lower()
+            if "10051" in err_str or "unreachable" in err_str:
+                print("-> Hint: Network unreachable. Make sure your laptop and ESP32 are connected to the same Wi-Fi.")
+            elif "timed out" in err_str:
+                print("-> Hint: Stream timed out. Ensure the ESP32 is powered on and close any browser tabs viewing " + args.camera_url)
         time.sleep(2)
 
 
