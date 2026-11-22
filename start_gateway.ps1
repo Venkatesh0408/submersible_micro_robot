@@ -62,4 +62,4 @@ Set-Location $scriptDir
 
 Write-Host "Connecting to stream: $targetUrl" -ForegroundColor Cyan
 Write-Host "Starting gateway relay..." -ForegroundColor Cyan
-py -u tools/camera_gateway.py --camera-url "$targetUrl" --token "$Token" --fps 30
+py -u tools/camera_gateway.py --camera-url "$targetUrl" --token "$Token" --fps 60 --workers 8
