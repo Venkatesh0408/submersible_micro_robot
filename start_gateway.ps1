@@ -47,9 +47,19 @@ if (-not $Token) {
     exit 1
 }
 
-# 4. Run the Python Gateway
+# 4. Resolve Target Stream URL
+if ($CameraIP -like "http*") {
+    $targetUrl = $CameraIP
+} elseif ($CameraIP -like "*:*") {
+    $targetUrl = "http://$CameraIP"
+} else {
+    $targetUrl = "http://${CameraIP}:81/stream"
+}
+
+# 5. Run the Python Gateway
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 
+Write-Host "Connecting to stream: $targetUrl" -ForegroundColor Cyan
 Write-Host "Starting gateway relay..." -ForegroundColor Cyan
-py -u tools/camera_gateway.py --camera-url "http://$($CameraIP):81/stream" --token "$Token" --fps 30
+py -u tools/camera_gateway.py --camera-url "$targetUrl" --token "$Token" --fps 30
