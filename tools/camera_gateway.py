@@ -162,7 +162,7 @@ def main():
             print("    Your laptop IP is : " + local_ip)
             print("    Your camera IP is : " + cam_host)
             print("    Your laptop and ESP32 are on DIFFERENT Wi-Fi networks.")
-            print("    -> Connect your laptop's Wi-Fi to your phone hotspot ('GalayxA14').")
+            print("    -> Connect your laptop's Wi-Fi to your phone hotspot ('GalaxyA14').")
             print("=" * 60 + "\n")
 
     session = requests.Session() if HAVE_REQUESTS else None

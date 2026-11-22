@@ -44,7 +44,7 @@
 // 1. WI-FI CONFIGURATION
 // ============================================================================
 // Replace with your 2.4 GHz Wi-Fi Router or Phone Hotspot credentials:
-const char* WIFI_SSID     = "GalayxA14";
+const char* WIFI_SSID     = "GalaxyA14";
 const char* WIFI_PASSWORD = "987654321";
 
 // Wi-Fi Access Point fallback (used when router/hotspot is unreachable)

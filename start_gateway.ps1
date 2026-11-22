@@ -24,12 +24,14 @@ Write-Host $CameraIP -ForegroundColor Green
 Write-Host ""
 
 # 2. Check subnet alignment
-if ($CameraIP -like "192.168.43.*" -and $localIP -notlike "192.168.43.*") {
+$camPrefix = ($CameraIP -split '\.')[0..2] -join '.'
+$localPrefix = ($localIP -split '\.')[0..2] -join '.'
+if ($camPrefix -ne $localPrefix -and $CameraIP -notlike "192.168.4.*") {
     Write-Host "[!] NETWORK MISMATCH DETECTED!" -ForegroundColor Red
     Write-Host "    Your laptop is connected to: '$wifiSSID' ($localIP)" -ForegroundColor Yellow
-    Write-Host "    The camera is on the hotspot: 'GalayxA14' ($CameraIP)" -ForegroundColor Yellow
+    Write-Host "    The camera is set to       : $CameraIP" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "    -> Please click the Wi-Fi icon on your taskbar and connect to 'GalayxA14'." -ForegroundColor Cyan
+    Write-Host "    -> Ensure both your laptop and ESP32 are connected to the same Wi-Fi / hotspot." -ForegroundColor Cyan
     Write-Host ""
 }
 
